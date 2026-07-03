@@ -6,6 +6,7 @@ import {
   buildClarificationBlock,
   findClarificationForSourceBlock,
   findClarificationNearSelection,
+  parseLiveClarificationItemsFromBlock,
 } from "./ask/ClarificationBlock";
 import { convertLegacyAskCards } from "./ask/LegacyAskCardConverter";
 import { parseAskCards } from "./ask/AskCardParser";
@@ -242,6 +243,9 @@ export default class AdaptiveLearningOsPlugin extends Plugin {
     const existingTarget = existingRecord
       ? {
           clarificationId: existingRecord.id,
+          targetItemId: annotation
+            ? findTargetItemId(markdown.slice(annotation.blockStart, annotation.blockEnd), selectedText, existingRecord.items)
+            : undefined,
           record: existingRecord,
           visibleMarkdown: annotation
             ? markdown.slice(annotation.blockStart, annotation.blockEnd)
@@ -250,6 +254,7 @@ export default class AdaptiveLearningOsPlugin extends Plugin {
       : annotation
       ? {
           clarificationId: annotation.clarificationId,
+          targetItemId: findTargetItemId(markdown.slice(annotation.blockStart, annotation.blockEnd), selectedText, []),
           record: existingRecord,
           visibleMarkdown: markdown.slice(annotation.blockStart, annotation.blockEnd),
         }
@@ -458,13 +463,23 @@ export default class AdaptiveLearningOsPlugin extends Plugin {
   }
 }
 
+function findTargetItemId(blockMarkdown: string, selectedText: string, fallbackItems: import("./types").ClarificationItem[]): string | undefined {
+  const needle = selectedText.trim();
+  if (!needle) return undefined;
+  const liveItems = parseLiveClarificationItemsFromBlock(blockMarkdown, fallbackItems);
+  return liveItems.find((item) => item.rawMarkdown.includes(needle) || item.item.explanation.includes(needle) || item.item.itemTitle.includes(needle))?.item.id;
+}
+
 function hasCleanupFindings(plan: OrphanCleanupPlan): boolean {
   return (
     plan.orphanClarifications.length > 0 ||
+    plan.deletedItems.length > 0 ||
+    plan.danglingItemMarkers.length > 0 ||
     plan.danglingMarkers.length > 0 ||
     plan.orphanJobs.length > 0 ||
     plan.askJobsMissingClarificationRecords.length > 0 ||
     plan.askJobsReferencingOrphanClarifications.length > 0 ||
+    plan.appliedJobsMissingItemMarkers.length > 0 ||
     plan.archivedJobs.length > 0 ||
     plan.appliedJobsMissingMarkers.length > 0
   );

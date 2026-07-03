@@ -1,7 +1,11 @@
+import { createClarificationItemId } from "../utils/ids";
 import type { ClarificationItem, ClarificationRecord, LearningOsSettings, UiLanguage } from "../types";
 
 export const LEARNOS_CLARIFICATION_ID_PATTERN =
   /%%\s*learnos-clarification-id:\s*(clar-[^%\s]+)\s*%%/g;
+const LEARNOS_CLARIFICATION_HTML_ID_PATTERN =
+  /<!--\s*learnos-clarification-id:\s*(clar-[^>\s]+)\s*-->/g;
+const LEARNOS_ITEM_ID_PATTERN = /<!--\s*learnos-item-id:\s*([^>;\s]+)(?:;\s*ask-ids:\s*([^>]+?))?\s*-->/g;
 
 export interface ClarificationAnnotationMatch {
   clarificationId: string;
@@ -11,16 +15,21 @@ export interface ClarificationAnnotationMatch {
   blockEnd: number;
 }
 
+export interface LiveClarificationItem {
+  item: ClarificationItem;
+  rawMarkdown: string;
+}
+
 export function buildClarificationBlock(
   record: Pick<ClarificationRecord, "id" | "items" | "uiLanguage">,
   settings?: Pick<LearningOsSettings, "uiLanguage">
 ): string {
   const uiLanguage = settings?.uiLanguage ?? record.uiLanguage;
   const title = uiLanguage === "en" ? "My understanding" : "我的理解";
-  const lines = [`> [!tip]- 💡 ${title}`];
+  const lines = [`> [!tip]- 💡 ${title}`, `> <!-- learnos-clarification-id: ${record.id} -->`];
 
-  for (const [index, item] of record.items.entries()) {
-    if (index > 0) lines.push(">");
+  for (const item of record.items) {
+    lines.push(">");
     lines.push(...itemToCalloutLines(item));
   }
 
@@ -28,7 +37,7 @@ export function buildClarificationBlock(
     lines.push("> ");
   }
 
-  return ensureBlockSpacing(`${lines.join("\n")}\n\n%% learnos-clarification-id: ${record.id} %%`);
+  return ensureBlockSpacing(lines.join("\n"));
 }
 
 export function findClarificationNearSelection(
@@ -86,27 +95,168 @@ export function replaceClarificationBlock(
 
 export function findAllClarificationAnnotations(markdown: string): ClarificationAnnotationMatch[] {
   const matches: ClarificationAnnotationMatch[] = [];
-  LEARNOS_CLARIFICATION_ID_PATTERN.lastIndex = 0;
 
-  let match: RegExpExecArray | null;
-  while ((match = LEARNOS_CLARIFICATION_ID_PATTERN.exec(markdown)) !== null) {
-    const markerStart = match.index;
-    const markerEnd = markerStart + match[0].length;
-    matches.push({
-      clarificationId: match[1],
-      markerStart,
-      markerEnd,
-      blockStart: findBlockStart(markdown, markerStart),
-      blockEnd: findBlockEnd(markdown, markerEnd),
-    });
+  for (const pattern of [LEARNOS_CLARIFICATION_ID_PATTERN, LEARNOS_CLARIFICATION_HTML_ID_PATTERN]) {
+    pattern.lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = pattern.exec(markdown)) !== null) {
+      const markerStart = match.index;
+      const markerEnd = markerStart + match[0].length;
+      matches.push({
+        clarificationId: match[1],
+        markerStart,
+        markerEnd,
+        blockStart: findBlockStart(markdown, markerStart),
+        blockEnd: findBlockEnd(markdown, markerEnd),
+      });
+    }
   }
 
-  return matches;
+  return matches.sort((a, b) => a.markerStart - b.markerStart);
 }
 
 function itemToCalloutLines(item: ClarificationItem): string[] {
-  const content = `**${item.itemTitle}** ${item.explanation}`.trim();
-  return content.split("\n").map((line) => `> ${line}`);
+  const title = normalizeClarificationItemTitle(item.itemTitle || item.targetText || item.question);
+  const explanation = normalizeClarificationItemExplanation(item.explanation, title);
+  const askIds = item.relatedInteractionIds.length > 0 ? `; ask-ids: ${item.relatedInteractionIds.join(",")}` : "";
+  const marker = `<!-- learnos-item-id: ${item.id}${askIds} -->`;
+  const firstLine = `**${title}**${explanation ? ` ${explanation}` : ""}`.trim();
+  return [`> ${marker}`, ...firstLine.split("\n").map((line) => `> ${line}`)];
+}
+
+export function parseLiveClarificationItemsFromBlock(
+  blockMarkdown: string,
+  fallback: ClarificationItem[] = []
+): LiveClarificationItem[] {
+  const contentLines = blockMarkdown
+    .split("\n")
+    .filter((line) => line.trim().startsWith(">"))
+    .map((line) => line.replace(/^\s*>\s?/, ""))
+    .filter((line) => !line.trim().startsWith("[!tip]"))
+    .filter((line) => !line.includes("learnos-clarification-id"));
+
+  const parsed = splitItemChunks(contentLines)
+    .map((chunk, index) => parseLiveItemChunk(chunk.join("\n").trim(), fallback[index], index + 1))
+    .filter((item): item is LiveClarificationItem => item !== null);
+
+  if (parsed.length > 0) return parsed;
+
+  return fallback.map((item) => ({
+    item,
+    rawMarkdown: `**${item.itemTitle}** ${item.explanation}`.trim(),
+  }));
+}
+
+export function liveItemsToClarificationItems(items: LiveClarificationItem[]): ClarificationItem[] {
+  return items.map((item) => item.item);
+}
+
+function splitItemChunks(lines: string[]): string[][] {
+  const chunks: string[][] = [];
+  let current: string[] = [];
+
+  for (const line of lines) {
+    if (isStandaloneItemMarkerLine(line) && current.length > 0) {
+      chunks.push(current);
+      current = [];
+    }
+    if (!line.trim()) {
+      if (current.length > 0) {
+        chunks.push(current);
+        current = [];
+      }
+      continue;
+    }
+    current.push(line);
+  }
+
+  if (current.length > 0) chunks.push(current);
+  return chunks;
+}
+
+function isStandaloneItemMarkerLine(line: string): boolean {
+  return /^<!--\s*learnos-item-id:\s*[^>]*-->\s*$/.test(line.trim());
+}
+
+function parseLiveItemChunk(
+  rawMarkdown: string,
+  fallback: ClarificationItem | undefined,
+  index: number
+): LiveClarificationItem | null {
+  if (!rawMarkdown.trim()) return null;
+  const markerMatch = /<!--\s*learnos-item-id:\s*([^>;\s]+)(?:;\s*ask-ids:\s*([^>]+?))?\s*-->/.exec(rawMarkdown);
+  const withoutMarker = rawMarkdown.replace(LEARNOS_ITEM_ID_PATTERN, "").trim();
+  LEARNOS_ITEM_ID_PATTERN.lastIndex = 0;
+  const titleMatch = /^\*\*(.*?)\*\*\s*([\s\S]*)$/.exec(withoutMarker);
+  const title = normalizeClarificationItemTitle(
+    titleMatch?.[1] ?? fallback?.itemTitle ?? fallback?.targetText ?? `Clarification ${index}`
+  );
+  const explanation = normalizeClarificationItemExplanation(titleMatch?.[2] ?? withoutMarker, title);
+  const now = new Date().toISOString();
+  const item: ClarificationItem = {
+    id: markerMatch?.[1] ?? fallback?.id ?? createClarificationItemId(title),
+    targetText: fallback?.targetText ?? title,
+    itemTitle: title,
+    question: fallback?.question ?? "",
+    explanation,
+    created: fallback?.created ?? now,
+    updated: fallback?.updated ?? now,
+    relatedInteractionIds: parseAskIds(markerMatch?.[2]) ?? fallback?.relatedInteractionIds ?? [],
+  };
+  return { item, rawMarkdown };
+}
+
+function parseAskIds(value: string | undefined): string[] | null {
+  if (!value) return null;
+  return value
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+export function normalizeClarificationItemTitle(value: string): string {
+  let title = value.trim();
+  title = title.replace(/^\*+/, "").trim();
+  title = title.replace(/\*+(\s*[:：!?！？.,，。;；])$/, "$1").trim();
+  title = title.replace(/\*+$/, "").trim();
+  title = title.replace(/\s+/g, " ");
+  if (!title) return "Clarification";
+  return title;
+}
+
+export function normalizeClarificationItemExplanation(value: string, itemTitle?: string): string {
+  const text = value
+    .replace(/\r\n/g, "\n")
+    .split("\n")
+    .map((line) => line.replace(/^\s*>\s?/, "").trimEnd())
+    .join("\n")
+    .replace(/<!--\s*learnos-item-id:\s*[^>]*-->/g, "")
+    .replace(/<!--\s*learnos-clarification-id:\s*[^>]*-->/g, "")
+    .replace(/%%\s*learnos-clarification-id:\s*[^%]*%%/g, "")
+    .trim();
+  return itemTitle ? stripLeadingDuplicateTitle(text, itemTitle) : text;
+}
+
+function stripLeadingDuplicateTitle(value: string, itemTitle: string): string {
+  const title = normalizeClarificationItemTitle(itemTitle);
+  if (!title) return value.trim();
+  const escapedTitle = escapeRegExp(title);
+  let text = value.trim();
+
+  for (let index = 0; index < 8; index += 1) {
+    const before = text;
+    text = text
+      .replace(new RegExp(`^\\*\\*${escapedTitle}\\*\\*\\s*[:：]?\\s*(?:\\n|$)`, "i"), "")
+      .trimStart();
+    text = text.replace(new RegExp(`^\\*\\*${escapedTitle}\\*\\*\\s+`, "i"), "").trimStart();
+    if (text === before) break;
+  }
+
+  return text.trim();
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function findBlockStart(markdown: string, markerStart: number): number {
@@ -140,11 +290,32 @@ function findBlockStart(markdown: string, markerStart: number): number {
 }
 
 function findBlockEnd(markdown: string, markerEnd: number): number {
+  const markerLineStart = markdown.lastIndexOf("\n", markerEnd - 1) + 1;
+  const markerLineEnd = nextLineEnd(markdown, markerEnd);
+  const markerLine = markdown.slice(markerLineStart, markerLineEnd);
+  if (isClarificationLine(markerLine)) {
+    let cursor = markerLineEnd;
+    if (markdown[cursor] === "\n") cursor += 1;
+    while (cursor < markdown.length) {
+      const lineEnd = nextLineEnd(markdown, cursor);
+      const line = markdown.slice(cursor, lineEnd);
+      if (!isClarificationLine(line)) break;
+      cursor = lineEnd;
+      if (markdown[cursor] === "\n") cursor += 1;
+    }
+    return cursor;
+  }
+
   let cursor = markerEnd;
   while (cursor < markdown.length && markdown[cursor] === "\n") {
     cursor += 1;
   }
   return cursor;
+}
+
+function nextLineEnd(markdown: string, from: number): number {
+  const nextNewline = markdown.indexOf("\n", from);
+  return nextNewline === -1 ? markdown.length : nextNewline;
 }
 
 function isClarificationLine(line: string): boolean {

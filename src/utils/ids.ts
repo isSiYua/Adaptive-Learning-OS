@@ -19,6 +19,10 @@ export function createClarificationId(concept: string, date = new Date()): strin
   return `clar-${timestampSlug(date)}-${slugify(concept, "paragraph")}`;
 }
 
+export function createClarificationItemId(value: string, date = new Date()): string {
+  return `item-${timestampSlug(date)}-${slugify(value, "clarification")}`;
+}
+
 export function createInteractionId(date = new Date()): string {
   return `ask-${timestampSlug(date)}-${Math.random().toString(36).slice(2, 8)}`;
 }

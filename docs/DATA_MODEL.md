@@ -25,12 +25,33 @@ Applied paragraph-level clarification records. One JSON file corresponds to one 
 The visible note block is linked to its backend record with a marker:
 
 ```markdown
+> <!-- learnos-clarification-id: clar-... -->
+```
+
+Legacy notes may still use the older marker after the callout:
+
+```markdown
 %% learnos-clarification-id: clar-... %%
 ```
 
 Deleting a clarification JSON record can leave a dangling marker in the note if the note still contains that marker.
 
 Deleting the visible clarification block from the note can leave an orphan clarification JSON record.
+
+The stable identity is the `learnos-clarification-id`, not the visible wording. You can edit the visible explanation text, item titles, spacing, or phrasing in Obsidian. As long as the marker remains, Learning OS should locate the block by marker and treat edited visible text as the latest user-owned content.
+
+Each clarification item also has a hidden item marker:
+
+```markdown
+> <!-- learnos-item-id: item-...; ask-ids: ask-... -->
+> **synthesis** explanation text
+```
+
+The item marker lets Learning OS distinguish three different situations:
+
+- the whole clarification block was deleted: the clarification id marker is missing
+- one item was deleted: the block marker remains, but that item id marker is missing
+- text was edited: markers remain, so cleanup should not delete anything
 
 ## `.learning-os/ask-cards/`
 
@@ -72,6 +93,12 @@ An orphan ask job means an ask job references a clarification that no longer exi
 An archived ask job ready to purge means a job record has status `archived` and can be permanently removed from Inbox history if the user confirms.
 
 An applied job missing marker means an ask job says it was applied, but the target clarification marker is no longer present in notes.
+
+Cleanup uses stable IDs, not visible Markdown text. It scans all Markdown notes for live `learnos-clarification-id` markers, compares them with `.learning-os/clarifications/`, and then checks `.learning-os/ask-jobs/` for history records that reference deleted or missing clarification IDs.
+
+Cleanup also scans live `learnos-item-id` markers. Text changes alone are never cleanup evidence. A backend item is considered deleted only when its item marker is missing from a live clarification block.
+
+Ask job records can also store source/item identity fields such as `sourceAnchorKey`, `proposedItemId`, `targetItemId`, `appliedClarificationId`, and `appliedItemIds`. These fields let old completed jobs rebase against the current live note and let multiple jobs from the same source paragraph merge into one clarification block.
 
 ## Why Does a Deleted Note Block Still Appear in Inbox History?
 

@@ -8,8 +8,11 @@ import {
 } from "../src/ask/ClarificationUpdatePromptBuilder.ts";
 import {
   buildClarificationBlock,
+  findAllClarificationAnnotations,
   findClarificationForSourceBlock,
   findClarificationNearSelection,
+  parseLiveClarificationItemsFromBlock,
+  normalizeClarificationItemTitle,
   replaceClarificationBlock,
 } from "../src/ask/ClarificationBlock.ts";
 import { getSourceBlockAtSelection } from "../src/editor/SourceBlock.ts";
@@ -49,8 +52,9 @@ test("clarification block renders one Chinese item with clarification marker", (
   const block = buildClarificationBlock(baseRecord);
 
   assert.match(block, /> \[!tip\]- 💡 我的理解/);
+  assert.match(block, /> <!-- learnos-clarification-id: clar-20260703-loocv -->/);
   assert.match(block, /\*\*为什么叫“无偏（unbiased）”？\*\*/);
-  assert.match(block, /%% learnos-clarification-id: clar-20260703-loocv %%\n\n/);
+  assert.match(block, /> <!-- learnos-item-id: item-unbiased; ask-ids: ask-1 -->\n> \*\*为什么叫“无偏（unbiased）”？/);
   assert.equal(block.includes("learnos-ask-id"), false);
 });
 
@@ -77,6 +81,95 @@ test("clarification block renders multiple items, English title, and inline LaTe
   assert.match(block, />/);
   assert.match(block, /\$MSE_1=\(y_1-\\hat y_1\)\^2\$/);
   assert.equal((block.match(/learnos-clarification-id/g) ?? []).length, 1);
+  assert.equal((block.match(/learnos-item-id/g) ?? []).length, 2);
+});
+
+test("live clarification parser reads item markers and legacy items", () => {
+  const block = buildClarificationBlock(baseRecord);
+  const parsed = parseLiveClarificationItemsFromBlock(block, baseRecord.items);
+
+  assert.equal(parsed.length, 1);
+  assert.equal(parsed[0].item.id, "item-unbiased");
+  assert.match(parsed[0].item.explanation, /test error/);
+
+  const legacy = `> [!tip]- 💡 我的理解
+> **Legacy item** legacy explanation
+
+%% learnos-clarification-id: clar-legacy %%
+`;
+  const legacyParsed = parseLiveClarificationItemsFromBlock(legacy, []);
+  assert.equal(legacyParsed.length, 1);
+  assert.equal(legacyParsed[0].item.itemTitle, "Legacy item");
+  assert.match(legacyParsed[0].item.id, /^item-/);
+});
+
+test("clarification block normalizes malformed bold titles and callout lines", () => {
+  for (const input of ["synthesis", "**synthesis**", "synthesis****", "**synthesis****", "****synthesis"]) {
+    assert.equal(normalizeClarificationItemTitle(input), "synthesis");
+  }
+  assert.equal(normalizeClarificationItemTitle("**synthesis**:"), "synthesis:");
+
+  const block = buildClarificationBlock({
+    ...baseRecord,
+    items: [
+      {
+        ...baseRecord.items[0],
+        itemTitle: "synthesis****",
+        explanation: "First line.\nSecond line.",
+      },
+    ],
+  });
+
+  assert.match(block, /> \*\*synthesis\*\* First line\./);
+  assert.equal(block.includes("synthesis****"), false);
+  assert.equal(
+    block
+      .split("\n")
+      .filter((line) => line.trim() && !line.includes("learnos-clarification-id"))
+      .every((line) => line.startsWith(">")),
+    true
+  );
+});
+
+test("clarification block sanitizes legacy inline item markers and repeated titles", () => {
+  const block = buildClarificationBlock({
+    ...baseRecord,
+    items: [
+      {
+        ...baseRecord.items[0],
+        id: "skill-definition",
+        itemTitle: "Skill",
+        explanation:
+          "**Skill** <!-- learnos-item-id: skill-definition; ask-ids: ask-1 -->\n**Skill** <!-- learnos-item-id: skill-definition; ask-ids: ask-1 -->\n**Skill** A skill profile records what the learner understands.",
+      },
+    ],
+  });
+
+  assert.equal((block.match(/learnos-item-id: skill-definition/g) ?? []).length, 1);
+  assert.equal((block.match(/\*\*Skill\*\*/g) ?? []).length, 1);
+  assert.match(block, /> \*\*Skill\*\* A skill profile records what the learner understands\./);
+  assert.doesNotMatch(block, /\*\*Skill\*\* <!-- learnos-item-id/);
+});
+
+test("live clarification parser handles slug item ids and strips duplicated title pollution", () => {
+  const dirtyBlock = `> [!tip]- 💡 我的理解
+> <!-- learnos-clarification-id: clar-20260703-092427-paragraph -->
+>
+> <!-- learnos-item-id: skill-definition; ask-ids: ask-20260703-092316-q1qf6t -->
+> **Skill** <!-- learnos-item-id: skill-definition; ask-ids: ask-20260703-092316-q1qf6t -->
+> **Skill** <!-- learnos-item-id: skill-definition; ask-ids: ask-20260703-092316-q1qf6t -->
+> **Skill** 你设想的个人知识掌握度档案。
+> <!-- learnos-item-id: dingshi-term; ask-ids: ask-20260703-092305-bwgizl -->
+> **定式的含义** <!-- learnos-item-id: dingshi-term; ask-ids: ask-20260703-092305-bwgizl -->
+> **定式的含义** 在这段笔记的语境中，“定式”指固定、僵化的教学模式。`;
+  const parsed = parseLiveClarificationItemsFromBlock(dirtyBlock, []);
+
+  assert.equal(parsed.length, 2);
+  assert.equal(parsed[0].item.id, "skill-definition");
+  assert.equal(parsed[0].item.itemTitle, "Skill");
+  assert.equal(parsed[0].item.explanation, "你设想的个人知识掌握度档案。");
+  assert.equal(parsed[1].item.id, "dingshi-term");
+  assert.equal(parsed[1].item.explanation, "在这段笔记的语境中，“定式”指固定、僵化的教学模式。");
 });
 
 test("source paragraph with no clarification creates a source block range", () => {
@@ -116,6 +209,34 @@ Next paragraph.`;
   assert.equal(match?.clarificationId, baseRecord.id);
 });
 
+test("clarification lookup uses marker after visible title and explanation edits", () => {
+  const markdown = `${baseRecord.sourceBlock}
+
+> [!tip]- 💡 我的理解
+> **A title I edited by hand** This explanation is also hand edited.
+
+%% learnos-clarification-id: ${baseRecord.id} %%
+
+Next paragraph.`;
+  const matches = findAllClarificationAnnotations(markdown);
+
+  assert.equal(matches.length, 1);
+  assert.equal(matches[0].clarificationId, baseRecord.id);
+  assert.match(markdown.slice(matches[0].blockStart, matches[0].blockEnd), /hand edited/);
+});
+
+test("clarification lookup supports html marker identity", () => {
+  const markdown = `> [!tip]- 💡 我的理解
+> **Edited** content
+
+<!-- learnos-clarification-id: ${baseRecord.id} -->
+`;
+  const matches = findAllClarificationAnnotations(markdown);
+
+  assert.equal(matches.length, 1);
+  assert.equal(matches[0].clarificationId, baseRecord.id);
+});
+
 test("replace clarification block does not duplicate marker or glue next paragraph", () => {
   const markdown = `${baseRecord.sourceBlock}
 
@@ -131,7 +252,8 @@ ${buildClarificationBlock(baseRecord)}Next paragraph.`;
   );
 
   assert.equal((updated.match(/learnos-clarification-id/g) ?? []).length, 1);
-  assert.match(updated, /%% learnos-clarification-id: clar-20260703-loocv %%\n\nNext paragraph/);
+  assert.match(updated, /learnos-item-id: item-unbiased/);
+  assert.match(updated, /\n\nNext paragraph/);
 });
 
 test("AI decision parser supports update existing item", () => {

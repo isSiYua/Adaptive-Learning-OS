@@ -38,8 +38,16 @@ export class OrphanCleanupModal extends Modal {
       this.plan.orphanClarifications.map((record) => `${record.id} · ${record.notePath}`)
     );
     this.renderList(
-      this.plugin.t("已应用但原文标记已删除的提问记录", "Applied ask jobs whose note marker is missing"),
+      this.plugin.t("已应用但笔记中的理解块已删除的提问记录", "Applied ask jobs whose note clarification was deleted"),
       this.plan.appliedJobsMissingMarkers.map(formatJob)
+    );
+    this.renderList(
+      this.plugin.t("已删除的理解项", "Deleted clarification items"),
+      this.plan.deletedItems.map((item) => `${item.clarificationId} · ${item.item.id} · ${item.item.itemTitle} · ${item.notePath}`)
+    );
+    this.renderList(
+      this.plugin.t("已应用但理解项 marker 缺失的提问记录", "Applied ask jobs whose item marker is missing"),
+      this.plan.appliedJobsMissingItemMarkers.map(formatJob)
     );
     this.renderList(
       this.plugin.t("引用缺失理解记录的提问记录", "Ask jobs referencing missing clarification records"),
@@ -52,6 +60,10 @@ export class OrphanCleanupModal extends Modal {
     this.renderList(
       this.plugin.t("失效 note marker（仅预览，不自动删除）", "Dangling note markers (preview only, not auto-removed)"),
       this.plan.danglingMarkers.map((marker) => `${marker.id} · ${marker.notePath} · ${marker.marker}`)
+    );
+    this.renderList(
+      this.plugin.t("失效 item marker（仅预览，不自动删除）", "Dangling item markers (preview only, not auto-removed)"),
+      this.plan.danglingItemMarkers.map((marker) => `${marker.clarificationId} · ${marker.itemId} · ${marker.notePath}`)
     );
     this.renderList(
       this.plugin.t("可清除归档记录", "Archived job records ready to purge"),
@@ -96,10 +108,13 @@ export class OrphanCleanupModal extends Modal {
     const summary = this.contentEl.createDiv({ cls: "learning-os-cleanup-summary" });
     const rows = [
       [this.plugin.t("孤儿理解记录", "Orphan clarifications"), this.plan.orphanClarifications.length],
-      [this.plugin.t("已应用但原文标记已删除的提问记录", "Applied jobs missing markers"), this.plan.appliedJobsMissingMarkers.length],
+      [this.plugin.t("已应用但笔记中的理解块已删除的提问记录", "Applied jobs whose note clarification was deleted"), this.plan.appliedJobsMissingMarkers.length],
+      [this.plugin.t("已删除的理解项", "Deleted clarification items"), this.plan.deletedItems.length],
+      [this.plugin.t("已应用但理解项 marker 缺失", "Applied jobs missing item markers"), this.plan.appliedJobsMissingItemMarkers.length],
       [this.plugin.t("引用缺失理解记录的提问记录", "Jobs missing clarification records"), this.plan.askJobsMissingClarificationRecords.length],
       [this.plugin.t("引用孤儿理解记录的提问记录", "Jobs linked to orphan clarifications"), this.plan.askJobsReferencingOrphanClarifications.length],
       [this.plugin.t("失效 note marker", "Dangling note markers"), this.plan.danglingMarkers.length],
+      [this.plugin.t("失效 item marker", "Dangling item markers"), this.plan.danglingItemMarkers.length],
       [this.plugin.t("可清除归档记录", "Archived records"), this.plan.archivedJobs.length],
     ] as Array<[string, number]>;
 

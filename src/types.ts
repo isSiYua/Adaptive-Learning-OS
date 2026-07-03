@@ -126,10 +126,19 @@ export interface ClarificationMergeProposal {
   action: "create-clarification" | "update-item" | "add-item" | "replace-item" | "append-item";
   clarificationId?: string;
   targetItemId?: string | null;
+  operations?: ClarificationMergeOperation[];
   proposedItems: ClarificationItem[];
   proposedVisibleMarkdown: string;
   reasoning?: string;
   confidence?: "low" | "medium" | "high";
+}
+
+export interface ClarificationMergeOperation {
+  op: "update-item" | "add-item";
+  itemId: string;
+  targetText: string;
+  itemTitle: string;
+  explanation: string;
 }
 
 export interface AskJob {
@@ -143,10 +152,17 @@ export interface AskJob {
   selectedText: string;
   sourceBlock: string;
   sourceBlockHash: string;
+  sourceAnchorKey?: string;
   sourceStartOffset?: number;
   sourceEndOffset?: number;
   detectedConcept?: string;
   existingClarificationId?: string;
+  targetClarificationId?: string;
+  targetItemId?: string;
+  proposedItemId?: string;
+  relatedItemIds?: string[];
+  appliedClarificationId?: string;
+  appliedItemIds?: string[];
   existingClarificationRecordPath?: string;
   existingVisibleMarkdown?: string;
   existingItemsSnapshot?: ClarificationItem[];
@@ -154,6 +170,8 @@ export interface AskJob {
   baseClarificationContentHash?: string;
   baseClarificationUpdated?: string;
   baseVisibleBlockHash?: string;
+  baseLiveClarificationHash?: string;
+  baseLiveItemHashes?: Record<string, string>;
   proposalVisibleMarkdownHash?: string;
   userQuestion: string;
   answerLanguage: AnswerLanguage;

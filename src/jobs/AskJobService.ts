@@ -9,7 +9,7 @@ import {
 } from "../ask/ClarificationMergeProposal";
 import { AnthropicCompatibleProvider } from "../ai/AnthropicCompatibleProvider";
 import { OpenAICompatibleProvider } from "../ai/OpenAICompatibleProvider";
-import { createAskJobId } from "../utils/ids";
+import { createAskJobId, createClarificationItemId } from "../utils/ids";
 import { toLocalIsoString } from "../utils/dates";
 import { stableHash } from "../utils/hash";
 import type { AskJobStore } from "../storage/AskJobStore";
@@ -27,6 +27,7 @@ type ApiProvider = OpenAICompatibleProvider | AnthropicCompatibleProvider;
 
 export interface AskJobExistingTarget {
   clarificationId?: string;
+  targetItemId?: string;
   record?: ClarificationRecord | null;
   visibleMarkdown?: string;
 }
@@ -84,6 +85,12 @@ export class AskJobService {
       responseStyle: "normal",
     });
     const id = createAskJobId(now);
+    const sourceAnchorKey = buildSourceAnchorKey({
+      notePath: params.context.notePath,
+      sourceBlockHash: params.context.sourceBlockHash,
+      headingPath: params.context.headingPath,
+    });
+    const proposedItemId = createClarificationItemId(params.question || params.context.selectedText, now);
     const job: AskJob = {
       schemaVersion: 1,
       id,
@@ -95,10 +102,14 @@ export class AskJobService {
       selectedText: params.context.selectedText,
       sourceBlock: params.context.sourceBlock,
       sourceBlockHash: params.context.sourceBlockHash,
+      sourceAnchorKey,
       sourceStartOffset: params.context.sourceStartOffset,
       sourceEndOffset: params.context.sourceEndOffset,
       detectedConcept: params.context.detectedConceptIds[0],
       existingClarificationId: params.existing?.clarificationId,
+      targetClarificationId: params.existing?.clarificationId,
+      targetItemId: params.existing?.targetItemId,
+      proposedItemId,
       existingClarificationRecordPath: params.existing?.clarificationId
         ? this.clarificationStore.recordPathForId(params.existing.clarificationId)
         : undefined,
@@ -109,6 +120,12 @@ export class AskJobService {
       baseClarificationUpdated: params.existing?.record?.updated,
       baseVisibleBlockHash: params.existing?.visibleMarkdown
         ? stableHash(params.existing.visibleMarkdown)
+        : undefined,
+      baseLiveClarificationHash: params.existing?.visibleMarkdown
+        ? stableHash(params.existing.visibleMarkdown)
+        : undefined,
+      baseLiveItemHashes: params.existing?.record
+        ? Object.fromEntries(params.existing.record.items.map((item) => [item.id, stableHash(item.explanation)]))
         : undefined,
       userQuestion: params.question,
       answerLanguage: settings.answerLanguage,
@@ -443,4 +460,12 @@ export class AskJobService {
       originalSelectionLength: job.selectedText.length,
     };
   }
+}
+
+export function buildSourceAnchorKey(params: {
+  notePath: string;
+  sourceBlockHash: string;
+  headingPath: string[];
+}): string {
+  return `${params.notePath}#${params.sourceBlockHash}#${params.headingPath.join(">")}`;
 }

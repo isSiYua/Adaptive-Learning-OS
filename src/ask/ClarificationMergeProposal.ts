@@ -1,4 +1,10 @@
-import { buildClarificationBlock } from "./ClarificationBlock";
+import {
+  buildClarificationBlock,
+  liveItemsToClarificationItems,
+  normalizeClarificationItemExplanation,
+  normalizeClarificationItemTitle,
+  parseLiveClarificationItemsFromBlock,
+} from "./ClarificationBlock";
 import { answerLanguageInstruction } from "./ClarificationUpdatePromptBuilder";
 import { createClarificationId } from "../utils/ids";
 import { toLocalIsoString } from "../utils/dates";
@@ -6,6 +12,7 @@ import type {
   AskInteraction,
   AskJob,
   ClarificationItem,
+  ClarificationMergeOperation,
   ClarificationMergeProposal,
   ClarificationRecord,
   LearningOsSettings,
@@ -68,6 +75,15 @@ ${params.rawAnswer}
 ## Required JSON
 
 {
+  "operations": [
+    {
+      "op": "update-item | add-item",
+      "itemId": "existing item id or new item id",
+      "targetText": "term or phrase explained",
+      "itemTitle": "short title",
+      "explanation": "final explanation text"
+    }
+  ],
   "action": "create-clarification | update-item | add-item | replace-item | append-item",
   "target_item_id": "item id or null",
   "proposed_items": [
@@ -129,6 +145,7 @@ ${params.staleProposalMarkdown}
 Return valid JSON only using the same schema as the merge proposal:
 
 {
+  "operations": [],
   "action": "update-item | add-item | replace-item | append-item",
   "target_item_id": "item id or null",
   "proposed_items": [],
@@ -146,18 +163,21 @@ export function parseClarificationMergeProposal(input: string): ClarificationMer
   try {
     const parsed = JSON.parse(jsonText) as Record<string, unknown>;
     const action = proposalAction(parsed.action);
+    const operations = parseOperations(parsed.operations);
     const proposedItemsRaw = Array.isArray(parsed.proposed_items) ? parsed.proposed_items : [];
-    const proposedItems = proposedItemsRaw
+    const proposedItemsFromItems = proposedItemsRaw
       .map((item, index) => normalizeItem(item, index + 1))
       .filter((item): item is ClarificationItem => item !== null);
+    const proposedItems = proposedItemsFromItems.length > 0 ? proposedItemsFromItems : operationsToItems(operations);
 
-    if (!action || proposedItems.length === 0) return null;
+    if (!action || (proposedItems.length === 0 && operations.length === 0)) return null;
 
     return {
       schemaVersion: 1,
       action,
       clarificationId: stringField(parsed.clarification_id),
       targetItemId: stringField(parsed.target_item_id) ?? null,
+      operations,
       proposedItems,
       proposedVisibleMarkdown: stringField(parsed.proposed_visible_markdown) ?? "",
       reasoning: stringField(parsed.reasoning),
@@ -176,7 +196,7 @@ export function createFallbackMergeProposal(params: {
 }): ClarificationMergeProposal {
   const nowIso = params.nowIso ?? toLocalIsoString();
   const item: ClarificationItem = {
-    id: createItemId(params.job.userQuestion || params.job.selectedText, 1),
+    id: params.job.proposedItemId ?? createItemId(params.job.userQuestion || params.job.selectedText, 1),
     targetText: params.job.selectedText,
     itemTitle: params.job.userQuestion || params.job.selectedText,
     question: params.job.userQuestion,
@@ -192,6 +212,15 @@ export function createFallbackMergeProposal(params: {
     clarificationId: params.existingRecord?.id,
     targetItemId: null,
     proposedItems: params.existingRecord ? [...params.existingRecord.items, item] : [item],
+    operations: [
+      {
+        op: params.existingRecord ? "add-item" : "add-item",
+        itemId: item.id,
+        targetText: item.targetText,
+        itemTitle: item.itemTitle,
+        explanation: item.explanation,
+      },
+    ],
     proposedVisibleMarkdown: "",
     reasoning: "Fallback proposal created from the AI answer.",
     confidence: "low",
@@ -252,12 +281,16 @@ export function proposalFromEditedMarkdown(params: {
   proposal: ClarificationMergeProposal;
   editedMarkdown: string;
 }): ClarificationMergeProposal {
-  const items = parseItemsFromVisibleMarkdown(params.editedMarkdown, params.proposal.proposedItems);
+  const items = itemsFromVisibleMarkdown(params.editedMarkdown, params.proposal.proposedItems);
   return {
     ...params.proposal,
     proposedItems: items.length > 0 ? items : params.proposal.proposedItems,
     proposedVisibleMarkdown: params.editedMarkdown,
   };
+}
+
+export function itemsFromVisibleMarkdown(markdown: string, fallback: ClarificationItem[]): ClarificationItem[] {
+  return parseItemsFromVisibleMarkdown(markdown, fallback);
 }
 
 function normalizeProposalItems(params: {
@@ -348,9 +381,12 @@ function completeItem(
   interactionId: string,
   nowIso: string
 ): ClarificationItem {
+  const itemTitle = normalizeClarificationItemTitle(item.itemTitle || item.targetText || `Clarification ${index}`);
   return {
     ...item,
     id: item.id || createItemId(item.itemTitle || item.targetText, index),
+    itemTitle,
+    explanation: normalizeClarificationItemExplanation(item.explanation, itemTitle),
     created: item.created || nowIso,
     updated: nowIso,
     relatedInteractionIds: Array.from(new Set([...(item.relatedInteractionIds ?? []), interactionId])),
@@ -379,12 +415,13 @@ function normalizeItem(value: unknown, index: number): ClarificationItem | null 
   const explanation = stringField(record.explanation);
   if (!itemTitle || !explanation) return null;
   const nowIso = toLocalIsoString();
+  const normalizedTitle = normalizeClarificationItemTitle(itemTitle);
   return {
-    id: stringField(record.id) ?? createItemId(itemTitle, index),
+    id: stringField(record.id) ?? createItemId(normalizedTitle, index),
     targetText: stringField(record.targetText) ?? "",
-    itemTitle,
+    itemTitle: normalizedTitle,
     question: stringField(record.question) ?? "",
-    explanation,
+    explanation: normalizeClarificationItemExplanation(explanation, normalizedTitle),
     created: stringField(record.created) ?? nowIso,
     updated: stringField(record.updated) ?? nowIso,
     relatedInteractionIds: Array.isArray(record.relatedInteractionIds)
@@ -393,7 +430,47 @@ function normalizeItem(value: unknown, index: number): ClarificationItem | null 
   };
 }
 
+function parseOperations(value: unknown): ClarificationMergeOperation[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => {
+      if (!item || typeof item !== "object") return null;
+      const record = item as Record<string, unknown>;
+      const op = record.op === "update-item" || record.op === "add-item" ? record.op : null;
+      const itemId = stringField(record.itemId) ?? stringField(record.item_id);
+      const itemTitle = stringField(record.itemTitle) ?? stringField(record.item_title);
+      const explanation = stringField(record.explanation);
+      if (!op || !itemId || !itemTitle || !explanation) return null;
+      const normalizedTitle = normalizeClarificationItemTitle(itemTitle);
+      return {
+        op,
+        itemId,
+        targetText: stringField(record.targetText) ?? stringField(record.target_text) ?? normalizedTitle,
+        itemTitle: normalizedTitle,
+        explanation: normalizeClarificationItemExplanation(explanation, normalizedTitle),
+      } satisfies ClarificationMergeOperation;
+    })
+    .filter((item): item is ClarificationMergeOperation => item !== null);
+}
+
+function operationsToItems(operations: ClarificationMergeOperation[]): ClarificationItem[] {
+  const nowIso = toLocalIsoString();
+  return operations.map((operation, index) => ({
+    id: operation.itemId || createItemId(operation.itemTitle, index + 1),
+    targetText: operation.targetText,
+    itemTitle: normalizeClarificationItemTitle(operation.itemTitle || operation.targetText),
+    question: "",
+    explanation: normalizeClarificationItemExplanation(operation.explanation, operation.itemTitle || operation.targetText),
+    created: nowIso,
+    updated: nowIso,
+    relatedInteractionIds: [],
+  }));
+}
+
 function parseItemsFromVisibleMarkdown(markdown: string, fallback: ClarificationItem[]): ClarificationItem[] {
+  const liveItems = liveItemsToClarificationItems(parseLiveClarificationItemsFromBlock(markdown, fallback));
+  if (liveItems.length > 0) return liveItems;
+
   const text = markdown
     .split("\n")
     .filter((line) => line.trim().startsWith(">"))
@@ -413,9 +490,9 @@ function parseItemsFromVisibleMarkdown(markdown: string, fallback: Clarification
     ...(fallback[index] ?? fallback[0]),
     id: fallback[index]?.id ?? createItemId(match[1], index + 1),
     targetText: fallback[index]?.targetText ?? match[1],
-    itemTitle: match[1].trim(),
+    itemTitle: normalizeClarificationItemTitle(match[1]),
     question: fallback[index]?.question ?? "",
-    explanation: match[2].trim(),
+    explanation: normalizeClarificationItemExplanation(match[2], match[1]),
     created: fallback[index]?.created ?? toLocalIsoString(),
     updated: toLocalIsoString(),
     relatedInteractionIds: fallback[index]?.relatedInteractionIds ?? [],
