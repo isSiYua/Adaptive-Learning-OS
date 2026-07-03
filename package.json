@@ -1,0 +1,25 @@
+{
+  "name": "adaptive-learning-os",
+  "version": "0.1.0",
+  "description": "Obsidian plugin for local-first adaptive learning workflows.",
+  "main": "main.js",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
+    "test": "node --loader ./tests/ts-extension-loader.mjs --test tests/*.test.mjs"
+  },
+  "keywords": [
+    "obsidian",
+    "learning",
+    "plugin"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^20.11.30",
+    "builtin-modules": "^3.3.0",
+    "esbuild": "^0.25.0",
+    "obsidian": "^1.8.7",
+    "typescript": "^5.6.3"
+  }
+}

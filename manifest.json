@@ -1,0 +1,10 @@
+{
+  "id": "adaptive-learning-os",
+  "name": "Adaptive Learning OS",
+  "version": "0.1.0",
+  "minAppVersion": "1.5.0",
+  "description": "Local-first adaptive learning tools for Obsidian notes.",
+  "author": "Adaptive Learning OS",
+  "authorUrl": "",
+  "isDesktopOnly": false
+}

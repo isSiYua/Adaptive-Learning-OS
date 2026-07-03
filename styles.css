@@ -1,0 +1,239 @@
+.learning-os-modal {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.learning-os-modal h2 {
+  margin: 0;
+}
+
+.learning-os-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.learning-os-field label {
+  font-weight: 600;
+}
+
+.learning-os-readonly {
+  max-height: 140px;
+  overflow: auto;
+  padding: 8px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  background: var(--background-secondary);
+  white-space: pre-wrap;
+}
+
+.learning-os-textarea {
+  width: 100%;
+  min-height: 72px;
+  resize: vertical;
+}
+
+.learning-os-prompt {
+  min-height: 120px;
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-smaller);
+}
+
+.learning-os-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.learning-os-inbox {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px;
+}
+
+.learning-os-inbox h2,
+.learning-os-inbox h3 {
+  margin: 0;
+}
+
+.learning-os-inbox-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.learning-os-count {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+
+.learning-os-status-summary,
+.learning-os-current-nav {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 8px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  background: var(--background-secondary);
+}
+
+.learning-os-tab-row {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+.learning-os-tab {
+  cursor: pointer;
+}
+
+.learning-os-tab.is-active {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+}
+
+.learning-os-cleanup-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  background: var(--background-secondary);
+}
+
+.learning-os-inbox-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.learning-os-job {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  background: var(--background-primary);
+}
+
+.learning-os-job-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.learning-os-job-summary {
+  cursor: pointer;
+  padding: 8px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  background: var(--background-primary);
+}
+
+.learning-os-job-summary:hover,
+.learning-os-job-summary.is-selected {
+  border-color: var(--interactive-accent);
+  background: var(--background-modifier-hover);
+}
+
+.learning-os-job-summary-meta {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+
+.learning-os-job-detail {
+  border-color: var(--interactive-accent);
+}
+
+.learning-os-history {
+  border-top: 1px solid var(--background-modifier-border);
+  padding-top: 12px;
+}
+
+.learning-os-history-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.learning-os-history-group h4 {
+  margin: 0;
+}
+
+.learning-os-job-header {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: baseline;
+}
+
+.learning-os-job-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.learning-os-job-label {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  font-weight: 600;
+}
+
+.learning-os-proposal-editor {
+  min-height: 320px;
+  max-height: 45vh;
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-smaller);
+}
+
+.learning-os-large-textarea {
+  resize: vertical;
+  user-select: text;
+}
+
+.learning-os-ai-answer {
+  min-height: 260px;
+  max-height: 45vh;
+}
+
+.learning-os-parsed-result {
+  min-height: 180px;
+  max-height: 38vh;
+}
+
+.learning-os-merge-reason {
+  min-height: 120px;
+  max-height: 30vh;
+}
+
+.learning-os-copyable-block {
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-smaller);
+  white-space: pre-wrap;
+}
+
+.learning-os-copyable-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.learning-os-empty {
+  color: var(--text-muted);
+  padding: 8px;
+  border: 1px dashed var(--background-modifier-border);
+  border-radius: 6px;
+}
+
+.learning-os-empty-helper {
+  margin-top: 4px;
+  font-size: var(--font-ui-smaller);
+}

@@ -1,0 +1,12 @@
+.DS_Store
+node_modules/
+.pnpm-store/
+
+# Obsidian/plugin build output
+main.js.map
+data.json
+.learning-os/
+
+# Local editor/runtime files
+.idea/
+.vscode/
