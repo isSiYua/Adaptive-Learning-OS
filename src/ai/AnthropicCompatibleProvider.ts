@@ -26,7 +26,8 @@ export class AnthropicCompatibleProvider implements AiProvider {
     const parsed = parseAiResponseOrFallback(content);
 
     return {
-      rawAnswer: parsed.answer,
+      rawAnswer: content,
+      answer: parsed.answer,
       keyAnswer: parsed.keyAnswer,
       suggestedTakeaway: parsed.suggestedTakeaway,
       suggestedMasterySignal: parsed.masterySignal,

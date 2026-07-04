@@ -1,10 +1,11 @@
-import { Notice } from "obsidian";
 import { buildAskPrompt } from "../ask/AskPromptBuilder";
 import {
   buildClarificationRebasePrompt,
   buildClarificationMergePrompt,
   createFallbackMergeProposal,
+  normalizeProposalForAskIntent,
   parseClarificationMergeProposal,
+  primaryProposalSourceText,
   proposalPreviewMarkdown,
 } from "../ask/ClarificationMergeProposal";
 import { AnthropicCompatibleProvider } from "../ai/AnthropicCompatibleProvider";
@@ -25,6 +26,13 @@ import type {
 
 type ApiProvider = OpenAICompatibleProvider | AnthropicCompatibleProvider;
 
+export interface AskJobLiveMergeContext {
+  existingRecord: ClarificationRecord | null;
+  currentVisibleMarkdown?: string;
+  reviewWarning?: string;
+  applyDisabledReason?: string;
+}
+
 export interface AskJobExistingTarget {
   clarificationId?: string;
   targetItemId?: string;
@@ -35,18 +43,29 @@ export interface AskJobExistingTarget {
 export interface AskJobServiceEvents {
   onChanged?: () => void;
   onReady?: (job: AskJob) => void;
+  onNotice?: (message: string) => void;
+  resolveLiveMergeContext?: (job: AskJob) => Promise<AskJobLiveMergeContext | null>;
 }
 
 export class AskJobService {
   private runningIds = new Set<string>();
   private waiters = new Map<string, Array<(job: AskJob) => void>>();
+  private store: AskJobStore;
+  private clarificationStore: ClarificationStore;
+  private getSettings: () => LearningOsSettings;
+  private events: AskJobServiceEvents;
 
   constructor(
-    private store: AskJobStore,
-    private clarificationStore: ClarificationStore,
-    private getSettings: () => LearningOsSettings,
-    private events: AskJobServiceEvents = {}
-  ) {}
+    store: AskJobStore,
+    clarificationStore: ClarificationStore,
+    getSettings: () => LearningOsSettings,
+    events: AskJobServiceEvents = {}
+  ) {
+    this.store = store;
+    this.clarificationStore = clarificationStore;
+    this.getSettings = getSettings;
+    this.events = events;
+  }
 
   async initialize(): Promise<void> {
     const jobs = await this.store.listJobs();
@@ -90,6 +109,21 @@ export class AskJobService {
       sourceBlockHash: params.context.sourceBlockHash,
       headingPath: params.context.headingPath,
     });
+    const duplicate = await this.findDuplicateJob({
+      notePath: params.context.notePath,
+      sourceAnchorKey,
+      question: params.question,
+      selectedText: params.context.selectedText,
+    });
+    if (duplicate) {
+      this.events.onNotice?.(
+        settings.uiLanguage === "en"
+          ? "This question already exists in Learning OS Inbox."
+          : "这个问题已经在 Learning OS 收件箱中。"
+      );
+      this.events.onChanged?.();
+      return duplicate;
+    }
     const proposedItemId = createClarificationItemId(params.question || params.context.selectedText, now);
     const job: AskJob = {
       schemaVersion: 1,
@@ -188,7 +222,7 @@ export class AskJobService {
     await this.setStatus(job, "archived", "archived");
   }
 
-  async remerge(job: AskJob): Promise<void> {
+  async remerge(job: AskJob, liveContext?: AskJobLiveMergeContext | null): Promise<void> {
     if (!job.rawAnswer) {
       await this.retry(job);
       return;
@@ -196,7 +230,8 @@ export class AskJobService {
 
     const settings = this.getSettings();
     const provider = this.createApiProvider(settings);
-    const existingRecord = await this.existingRecordForJob(job);
+    const resolvedLiveContext = liveContext === undefined ? (await this.events.resolveLiveMergeContext?.(job)) ?? null : liveContext;
+    const existingRecord = resolvedLiveContext ? resolvedLiveContext.existingRecord : await this.existingRecordForJob(job);
     const proposal = await this.createMergeProposal(job, existingRecord, provider, settings);
     const visible = proposalPreviewMarkdown({
       job,
@@ -217,6 +252,8 @@ export class AskJobService {
         baseClarificationContentHash: existingRecord?.contentHash,
         baseClarificationUpdated: existingRecord?.updated,
         proposalVisibleMarkdownHash: stableHash(visible),
+        reviewWarning: resolvedLiveContext?.reviewWarning,
+        applyDisabledReason: resolvedLiveContext?.applyDisabledReason,
         error: undefined,
       },
       "completed"
@@ -250,7 +287,7 @@ export class AskJobService {
       createFallbackMergeProposal({
         job,
         existingRecord: latestRecord,
-        explanation: job.parsedAnswer?.suggested_takeaway || job.parsedAnswer?.key_answer || job.rawAnswer,
+        explanation: primaryProposalSourceText(job),
       });
     const visible = proposalPreviewMarkdown({
       job,
@@ -326,7 +363,7 @@ export class AskJobService {
         ...current,
         rawAnswer: response.rawAnswer,
         parsedAnswer: {
-          answer: response.rawAnswer,
+          answer: response.answer,
           key_answer: response.keyAnswer,
           suggested_takeaway: response.suggestedTakeaway,
           mastery_signal: response.suggestedMasterySignal,
@@ -334,7 +371,8 @@ export class AskJobService {
         },
       };
 
-      const existingRecord = await this.existingRecordForJob(current);
+      const liveContext = (await this.events.resolveLiveMergeContext?.(current)) ?? null;
+      const existingRecord = liveContext ? liveContext.existingRecord : await this.existingRecordForJob(current);
       const proposal = await this.createMergeProposal(current, existingRecord, provider, settings);
       const completed: AskJob = {
         ...current,
@@ -357,6 +395,8 @@ export class AskJobService {
             settings,
           })
         ),
+        reviewWarning: liveContext?.reviewWarning,
+        applyDisabledReason: liveContext?.applyDisabledReason,
         error: undefined,
       };
 
@@ -386,7 +426,7 @@ export class AskJobService {
     provider: ApiProvider,
     settings: LearningOsSettings
   ) {
-    const explanation = job.parsedAnswer?.suggested_takeaway || job.parsedAnswer?.key_answer || job.rawAnswer || "";
+    const explanation = primaryProposalSourceText(job);
     try {
       const prompt = buildClarificationMergePrompt({
         job,
@@ -395,17 +435,22 @@ export class AskJobService {
         answerLanguage: settings.answerLanguage,
       });
       const rawProposal = await provider.completePrompt(prompt);
-      return (
+      const proposal =
         parseClarificationMergeProposal(rawProposal) ??
-        createFallbackMergeProposal({ job, existingRecord, explanation })
-      );
+        createFallbackMergeProposal({ job, existingRecord, explanation });
+      return normalizeProposalForAskIntent({ job, existingRecord, proposal, explanation });
     } catch {
-      new Notice(
+      this.events.onNotice?.(
         settings.uiLanguage === "en"
           ? "AI merge failed. A safe fallback proposal was created."
           : "AI 合并失败，已生成安全的 fallback 建议。"
       );
-      return createFallbackMergeProposal({ job, existingRecord, explanation });
+      return normalizeProposalForAskIntent({
+        job,
+        existingRecord,
+        proposal: createFallbackMergeProposal({ job, existingRecord, explanation }),
+        explanation,
+      });
     }
   }
 
@@ -414,6 +459,28 @@ export class AskJobService {
       return this.clarificationStore.readRecord(job.existingClarificationId);
     }
     return this.clarificationStore.findByNotePathAndSourceHash(job.notePath, job.sourceBlockHash);
+  }
+
+  private async findDuplicateJob(params: {
+    notePath: string;
+    sourceAnchorKey: string;
+    question: string;
+    selectedText: string;
+  }): Promise<AskJob | null> {
+    const normalizedQuestion = normalizeDuplicateKey(params.question);
+    const normalizedSelection = normalizeDuplicateKey(params.selectedText);
+    const jobs = await this.store.listJobs();
+    return (
+      jobs.find((job) => {
+        if (["failed", "archived", "cancelled"].includes(job.status)) return false;
+        return (
+          job.notePath === params.notePath &&
+          job.sourceAnchorKey === params.sourceAnchorKey &&
+          normalizeDuplicateKey(job.userQuestion) === normalizedQuestion &&
+          normalizeDuplicateKey(job.selectedText) === normalizedSelection
+        );
+      }) ?? null
+    );
   }
 
   private async setStatus(
@@ -460,6 +527,10 @@ export class AskJobService {
       originalSelectionLength: job.selectedText.length,
     };
   }
+}
+
+function normalizeDuplicateKey(value: string): string {
+  return value.trim().replace(/\s+/g, " ").toLowerCase();
 }
 
 export function buildSourceAnchorKey(params: {

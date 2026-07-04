@@ -16,7 +16,15 @@ export function createAskCardId(concept: string, date = new Date()): string {
 }
 
 export function createClarificationId(concept: string, date = new Date()): string {
-  return `clar-${timestampSlug(date)}-${slugify(concept, "paragraph")}`;
+  return `clar-${timestampSlug(date)}-${String(date.getMilliseconds()).padStart(3, "0")}-${Math.random()
+    .toString(36)
+    .slice(2, 8)}-${slugify(concept, "paragraph")}`;
+}
+
+export function createGeneratedContentId(concept: string, date = new Date()): string {
+  return `gen-${timestampSlug(date)}-${String(date.getMilliseconds()).padStart(3, "0")}-${Math.random()
+    .toString(36)
+    .slice(2, 8)}-${slugify(concept, "content")}`;
 }
 
 export function createClarificationItemId(value: string, date = new Date()): string {

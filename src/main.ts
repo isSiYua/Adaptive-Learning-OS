@@ -12,9 +12,20 @@ import { convertLegacyAskCards } from "./ask/LegacyAskCardConverter";
 import { parseAskCards } from "./ask/AskCardParser";
 import { positionToOffset } from "./editor/MarkdownOffsets";
 import { SelectionContextCollector } from "./editor/SelectionContextCollector";
-import { getSourceBlockAtSelection, getSourceBlockBeforeOffset } from "./editor/SourceBlock";
+import {
+  detectAskSourceMode,
+  getSemanticSourceBlockAtSelection,
+  resolveOriginalProseContext,
+} from "./editor/SourceBlock";
 import { AskJobService } from "./jobs/AskJobService";
-import { applyAskJobProposal, findLiveClarificationMatch } from "./jobs/ApplyAskJobProposal";
+import { applyAskJobProposal } from "./jobs/ApplyAskJobProposal";
+import {
+  liveStateWarning,
+  recordFromLiveClarificationState,
+  resolveLiveClarificationState,
+} from "./jobs/LiveClarificationState";
+import { liveAwareProposalForState, sourceDeletedApplyPolicy } from "./jobs/LiveAwareMerge";
+import { generatedContentMissingWarning } from "./ask/AskIntent";
 import { DEFAULT_SETTINGS, LearningOsSettingTab } from "./settings";
 import { AskJobStore } from "./storage/AskJobStore";
 import { ClarificationStore } from "./storage/ClarificationStore";
@@ -32,6 +43,7 @@ export default class AdaptiveLearningOsPlugin extends Plugin {
   private clarificationStore!: ClarificationStore;
   private askJobStore!: AskJobStore;
   private askJobService!: AskJobService;
+  private floatingAskButton: HTMLButtonElement | null = null;
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -121,11 +133,14 @@ export default class AdaptiveLearningOsPlugin extends Plugin {
         });
       })
     );
+    this.registerSelectionAskButton();
 
     await this.askJobService.initialize();
   }
 
-  onunload(): void {}
+  onunload(): void {
+    this.hideFloatingAskButton();
+  }
 
   async loadSettings(): Promise<void> {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
@@ -187,6 +202,10 @@ export default class AdaptiveLearningOsPlugin extends Plugin {
         onReady: () => {
           new Notice(this.t("Learning OS：有 1 条 AI 回答待处理。", "Learning OS: 1 AI answer is ready for review."));
         },
+        onNotice: (message) => {
+          new Notice(message);
+        },
+        resolveLiveMergeContext: (job) => this.resolveLiveMergeContext(job),
       }
     );
   }
@@ -203,18 +222,32 @@ export default class AdaptiveLearningOsPlugin extends Plugin {
     const markdown = editor.getValue();
     const selectionStart = positionToOffset(markdown, editor.getCursor("from"));
     const selectionEnd = positionToOffset(markdown, editor.getCursor("to"));
-    const selectedSourceBlock = getSourceBlockAtSelection(markdown, selectionStart, selectionEnd);
-    let annotation = findClarificationNearSelection(markdown, selectionStart, selectionEnd);
-    if (!annotation) {
-      annotation = findClarificationForSourceBlock(
-        markdown,
-        selectedSourceBlock.start,
-        selectedSourceBlock.end
-      );
-    }
+    const physicalSourceMode = detectAskSourceMode(markdown, selectionStart, selectionEnd);
+    const selectedOriginalContext = resolveOriginalProseContext({
+      markdown,
+      selectionStart,
+      selectionEnd,
+      selectedText: selectedText.trim(),
+    });
+    const selectedSourceBlock =
+      selectedOriginalContext.sourceBlock ??
+      getSemanticSourceBlockAtSelection(markdown, selectionStart, selectionEnd);
+    const physicalAnnotation =
+      physicalSourceMode === "clarification-item"
+        ? findClarificationNearSelection(markdown, selectionStart, selectionEnd)
+        : null;
+    const generatedAnnotation =
+      physicalSourceMode === "generated-content-item"
+        ? findGeneratedContentNearSelection(markdown, selectionStart, selectionEnd)
+        : null;
+    const associatedAnnotation =
+      physicalAnnotation ??
+      (physicalSourceMode === "normal-note"
+        ? findClarificationForSourceBlock(markdown, selectedSourceBlock.start, selectedSourceBlock.end)
+        : null);
 
-    let existingRecord = annotation
-      ? await this.clarificationStore.readRecord(annotation.clarificationId)
+    let existingRecord = associatedAnnotation
+      ? await this.clarificationStore.readRecord(associatedAnnotation.clarificationId)
       : null;
     if (!existingRecord) {
       existingRecord = await this.clarificationStore.findByNotePathAndSourceHash(
@@ -222,41 +255,73 @@ export default class AdaptiveLearningOsPlugin extends Plugin {
         selectedSourceBlock.hash
       );
     }
-    const sourceBlock = existingRecord
-      ? {
-          start: existingRecord.sourceStartOffset ?? getSourceBlockBeforeOffset(markdown, annotation?.blockStart ?? selectionStart).start,
-          end: existingRecord.sourceEndOffset ?? getSourceBlockBeforeOffset(markdown, annotation?.blockStart ?? selectionStart).end,
-          text: existingRecord.sourceBlock,
-          hash: existingRecord.sourceBlockHash,
-        }
-      : selectedSourceBlock;
-    context.sourceBlock = sourceBlock.text;
-    context.sourceBlockHash = sourceBlock.hash;
-    context.sourceStartOffset = sourceBlock.start;
-    context.sourceEndOffset = sourceBlock.end;
+    const promptOriginalContext =
+      physicalSourceMode === "normal-note"
+        ? selectedOriginalContext
+        : resolveOriginalProseContext({
+            markdown,
+            selectedText: existingRecord?.sourceBlock ? undefined : selectedText.trim(),
+            sourceBlock: existingRecord?.sourceBlock,
+            sourceBlockHash: existingRecord?.sourceBlockHash,
+            sourceStartOffset: existingRecord?.sourceStartOffset,
+            sourceEndOffset: existingRecord?.sourceEndOffset,
+          });
+    const promptSourceBlock = promptOriginalContext.sourceBlock ?? selectedSourceBlock;
+    context.askSourceMode = physicalSourceMode;
+    context.sourceBlock = promptSourceBlock.text;
+    context.sourceBlockHash = promptSourceBlock.hash;
+    context.sourceStartOffset = promptSourceBlock.start;
+    context.sourceEndOffset = promptSourceBlock.end;
+    context.nearbyBefore = truncateContext(promptOriginalContext.nearbyBefore, this.settings.maxContextBeforeChars, "start");
+    context.nearbyAfter = truncateContext(promptOriginalContext.nearbyAfter, this.settings.maxContextAfterChars, "end");
     context.answerLanguage = this.settings.answerLanguage;
 
-    if (annotation && !existingRecord) {
-      new Notice(`Found ${annotation.clarificationId}, but its external JSON is missing. Saving will recreate it.`);
+    if (physicalAnnotation) {
+      const blockMarkdown = markdown.slice(physicalAnnotation.blockStart, physicalAnnotation.blockEnd);
+      const itemContext = learningOsItemContextFromBlock(
+        blockMarkdown,
+        physicalAnnotation.clarificationId,
+        selectedText,
+        existingRecord?.items ?? []
+      );
+      if (itemContext) {
+        context.askSourceMode = "clarification-item";
+        context.selectedLearningOsItem = itemContext.selected;
+        context.siblingLearningOsItems = itemContext.siblings;
+        context.originalSourceBlockBackground = promptSourceBlock.text || existingRecord?.sourceBlock || "";
+      }
+    } else if (generatedAnnotation) {
+      const blockMarkdown = markdown.slice(generatedAnnotation.blockStart, generatedAnnotation.blockEnd);
+      const itemContext = learningOsItemContextFromBlock(blockMarkdown, generatedAnnotation.generatedId, selectedText, []);
+      if (itemContext) {
+        context.askSourceMode = "generated-content-item";
+        context.selectedLearningOsItem = itemContext.selected;
+        context.siblingLearningOsItems = itemContext.siblings;
+        context.originalSourceBlockBackground = promptSourceBlock.text || context.sourceBlock;
+      }
+    }
+
+    if (associatedAnnotation && !existingRecord) {
+      new Notice(`Found ${associatedAnnotation.clarificationId}, but its external JSON is missing. Saving will recreate it.`);
     }
 
     const existingTarget = existingRecord
       ? {
           clarificationId: existingRecord.id,
-          targetItemId: annotation
-            ? findTargetItemId(markdown.slice(annotation.blockStart, annotation.blockEnd), selectedText, existingRecord.items)
+          targetItemId: associatedAnnotation
+            ? findTargetItemId(markdown.slice(associatedAnnotation.blockStart, associatedAnnotation.blockEnd), selectedText, existingRecord.items)
             : undefined,
           record: existingRecord,
-          visibleMarkdown: annotation
-            ? markdown.slice(annotation.blockStart, annotation.blockEnd)
+          visibleMarkdown: associatedAnnotation
+            ? markdown.slice(associatedAnnotation.blockStart, associatedAnnotation.blockEnd)
             : buildClarificationBlock(existingRecord, this.settings),
         }
-      : annotation
+      : associatedAnnotation
       ? {
-          clarificationId: annotation.clarificationId,
-          targetItemId: findTargetItemId(markdown.slice(annotation.blockStart, annotation.blockEnd), selectedText, []),
+          clarificationId: associatedAnnotation.clarificationId,
+          targetItemId: findTargetItemId(markdown.slice(associatedAnnotation.blockStart, associatedAnnotation.blockEnd), selectedText, []),
           record: existingRecord,
-          visibleMarkdown: markdown.slice(annotation.blockStart, annotation.blockEnd),
+          visibleMarkdown: markdown.slice(associatedAnnotation.blockStart, associatedAnnotation.blockEnd),
         }
       : undefined;
 
@@ -282,6 +347,67 @@ export default class AdaptiveLearningOsPlugin extends Plugin {
         await this.openAskInbox();
       },
     }, existingTarget ? { clarificationId: existingTarget.clarificationId } : undefined).open();
+  }
+
+  private registerSelectionAskButton(): void {
+    const update = () => {
+      window.setTimeout(() => this.updateFloatingAskButton(), 0);
+    };
+    this.registerDomEvent(document, "selectionchange", update);
+    this.registerDomEvent(document, "mouseup", update);
+    this.registerDomEvent(document, "keyup", update);
+    this.registerDomEvent(document, "scroll", () => this.hideFloatingAskButton(), true);
+  }
+
+  private updateFloatingAskButton(): void {
+    const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+    if (!view) {
+      this.hideFloatingAskButton();
+      return;
+    }
+    const selectedText = view.editor.getSelection();
+    if (!selectedText || selectedText.trim().length === 0) {
+      this.hideFloatingAskButton();
+      return;
+    }
+
+    const selection = window.getSelection();
+    const rect =
+      selection && selection.rangeCount > 0 ? selection.getRangeAt(0).getBoundingClientRect() : null;
+    const fallbackRect = view.containerEl.getBoundingClientRect();
+    const left = rect && rect.width > 0 ? rect.left + rect.width / 2 : fallbackRect.right - 72;
+    const top = rect && rect.height > 0 ? rect.top - 36 : fallbackRect.top + 48;
+    const button = this.ensureFloatingAskButton();
+    button.style.left = `${Math.max(8, Math.min(window.innerWidth - 56, left - 18))}px`;
+    button.style.top = `${Math.max(8, top)}px`;
+    button.style.display = "block";
+  }
+
+  private ensureFloatingAskButton(): HTMLButtonElement {
+    if (this.floatingAskButton) return this.floatingAskButton;
+    const button = document.body.createEl("button", {
+      cls: "learning-os-floating-ask-button",
+      text: this.t("问", "Ask"),
+    });
+    button.setAttr("title", this.t("询问 Learning OS", "Ask Learning OS"));
+    button.addEventListener("mousedown", (event) => {
+      event.preventDefault();
+    });
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+      if (!view) return;
+      this.hideFloatingAskButton();
+      void this.openAskModal(view.editor, view);
+    });
+    this.floatingAskButton = button;
+    return button;
+  }
+
+  private hideFloatingAskButton(): void {
+    if (this.floatingAskButton) {
+      this.floatingAskButton.style.display = "none";
+    }
   }
 
   async openAskInbox(): Promise<void> {
@@ -316,20 +442,47 @@ export default class AdaptiveLearningOsPlugin extends Plugin {
   }
 
   async remergeAskJob(job: AskJob): Promise<void> {
-    const sourceFile = this.app.vault.getAbstractFileByPath(job.notePath);
-    if (sourceFile instanceof TFile) {
-      const markdown = await this.app.vault.read(sourceFile);
-      const match = findLiveClarificationMatch(markdown, job);
-      const currentVisibleMarkdown = match ? markdown.slice(match.blockStart, match.blockEnd) : "";
-      const latestRecord = job.existingClarificationId
-        ? await this.clarificationStore.readRecord(job.existingClarificationId)
-        : await this.clarificationStore.findByNotePathAndSourceHash(job.notePath, job.sourceBlockHash);
-      if (latestRecord && currentVisibleMarkdown) {
-        await this.askJobService.rebase(job, latestRecord, currentVisibleMarkdown);
-        return;
-      }
+    const liveContext = await this.resolveLiveMergeContext(job);
+    if (liveContext?.existingRecord && liveContext.currentVisibleMarkdown) {
+      await this.askJobService.rebase(job, liveContext.existingRecord, liveContext.currentVisibleMarkdown);
+      return;
     }
-    await this.askJobService.remerge(job);
+    await this.askJobService.remerge(job, liveContext);
+  }
+
+  private async resolveLiveMergeContext(job: AskJob) {
+    const backendRecord = job.existingClarificationId
+      ? await this.clarificationStore.readRecord(job.existingClarificationId)
+      : await this.clarificationStore.findByNotePathAndSourceHash(job.notePath, job.sourceBlockHash);
+    const state = await resolveLiveClarificationState({
+      app: this.app,
+      job,
+      fallbackItems: backendRecord?.items ?? job.existingItemsSnapshot ?? [],
+    });
+    const liveRecord = recordFromLiveClarificationState({
+      state,
+      job,
+      backendRecord,
+      settings: this.settings,
+    });
+    const sourceDeletedPolicy = sourceDeletedApplyPolicy({
+      job,
+      liveState: state,
+      uiLanguage: this.settings.uiLanguage,
+    });
+    const warnings = [
+      liveStateWarning(state, this.settings.uiLanguage),
+      sourceDeletedPolicy.warning,
+      generatedContentMissingWarning(job.userQuestion, job.rawAnswer ?? ""),
+    ].filter((item): item is string => Boolean(item));
+
+    return {
+      existingRecord: liveRecord,
+      currentVisibleMarkdown:
+        state.kind === "block-live" || state.kind === "item-deleted" ? state.liveBlockMarkdown : undefined,
+      reviewWarning: warnings.join("\n\n") || undefined,
+      applyDisabledReason: sourceDeletedPolicy.applyDisabledReason,
+    };
   }
 
   async archiveAskJob(job: AskJob): Promise<void> {
@@ -352,6 +505,58 @@ export default class AdaptiveLearningOsPlugin extends Plugin {
     });
     await this.refreshAskInboxViews();
     return result;
+  }
+
+  async liveAwarePreviewJob(job: AskJob): Promise<AskJob> {
+    if (!job.mergeProposal) return job;
+    const backendRecord = job.existingClarificationId
+      ? await this.clarificationStore.readRecord(job.existingClarificationId)
+      : await this.clarificationStore.findByNotePathAndSourceHash(job.notePath, job.sourceBlockHash);
+    const state = await resolveLiveClarificationState({
+      app: this.app,
+      job,
+      fallbackItems: backendRecord?.items ?? job.existingItemsSnapshot ?? [],
+    });
+    const liveRecord = recordFromLiveClarificationState({
+      state,
+      job,
+      backendRecord,
+      settings: this.settings,
+    });
+    const preview = liveAwareProposalForState({
+      job,
+      liveState: state,
+      liveRecord,
+      settings: this.settings,
+    });
+    const sourceDeletedPolicy = sourceDeletedApplyPolicy({
+      job,
+      liveState: state,
+      uiLanguage: this.settings.uiLanguage,
+    });
+    const warnings = [
+      liveStateWarning(state, this.settings.uiLanguage),
+      sourceDeletedPolicy.warning,
+      generatedContentMissingWarning(job.userQuestion, job.rawAnswer ?? ""),
+    ].filter((item): item is string => Boolean(item));
+    if (!preview) {
+      return {
+        ...job,
+        reviewWarning: warnings.join("\n\n") || job.reviewWarning,
+        applyDisabledReason: sourceDeletedPolicy.applyDisabledReason ?? job.applyDisabledReason,
+      };
+    }
+    return {
+      ...job,
+      reviewWarning: warnings.join("\n\n") || undefined,
+      applyDisabledReason: sourceDeletedPolicy.applyDisabledReason,
+      mergeProposal: {
+        ...preview.proposal,
+        clarificationId: preview.existingRecord?.id ?? preview.proposal.clarificationId,
+        proposedVisibleMarkdown: preview.visible,
+      },
+      proposalVisibleMarkdownHash: undefined,
+    };
   }
 
   async openOrphanCleanup(): Promise<void> {
@@ -468,6 +673,94 @@ function findTargetItemId(blockMarkdown: string, selectedText: string, fallbackI
   if (!needle) return undefined;
   const liveItems = parseLiveClarificationItemsFromBlock(blockMarkdown, fallbackItems);
   return liveItems.find((item) => item.rawMarkdown.includes(needle) || item.item.explanation.includes(needle) || item.item.itemTitle.includes(needle))?.item.id;
+}
+
+function truncateContext(value: string, maxChars: number, side: "start" | "end"): string {
+  if (value.length <= maxChars) return value;
+  if (side === "start") return `...[truncated]\n${value.slice(Math.max(0, value.length - maxChars))}`;
+  return `${value.slice(0, maxChars)}\n...[truncated]`;
+}
+
+interface GeneratedAnnotationMatch {
+  generatedId: string;
+  blockStart: number;
+  blockEnd: number;
+}
+
+function findGeneratedContentNearSelection(
+  markdown: string,
+  selectionStart: number,
+  selectionEnd: number
+): GeneratedAnnotationMatch | null {
+  const pattern = /<!--\s*learnos-generated-id:\s*(gen-[^>\s]+)\s*-->/g;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(markdown)) !== null) {
+    const blockStart = findLearningOsCalloutStart(markdown, match.index);
+    const blockEnd = findLearningOsCalloutEnd(markdown, match.index + match[0].length);
+    if (selectionStart < blockEnd && blockStart < selectionEnd) {
+      return { generatedId: match[1], blockStart, blockEnd };
+    }
+  }
+  return null;
+}
+
+function learningOsItemContextFromBlock(
+  blockMarkdown: string,
+  containerId: string,
+  selectedText: string,
+  fallbackItems: import("./types").ClarificationItem[]
+): {
+  selected: NonNullable<SelectionContext["selectedLearningOsItem"]>;
+  siblings: NonNullable<SelectionContext["siblingLearningOsItems"]>;
+} | null {
+  const needle = selectedText.trim();
+  const liveItems = parseLiveClarificationItemsFromBlock(blockMarkdown, fallbackItems);
+  if (liveItems.length === 0) return null;
+  const selectedLiveItem =
+    liveItems.find(
+      (item) => needle && (item.rawMarkdown.includes(needle) || item.item.explanation.includes(needle) || item.item.itemTitle.includes(needle))
+    ) ?? liveItems[0];
+  return {
+    selected: {
+      containerId,
+      itemId: selectedLiveItem.item.id,
+      itemTitle: selectedLiveItem.item.itemTitle,
+      itemContent: selectedLiveItem.item.explanation,
+    },
+    siblings: liveItems
+      .filter((item) => item.item.id !== selectedLiveItem.item.id)
+      .map((item) => ({
+        itemId: item.item.id,
+        itemTitle: item.item.itemTitle,
+        itemContent: item.item.explanation,
+      })),
+  };
+}
+
+function findLearningOsCalloutStart(markdown: string, markerStart: number): number {
+  let start = markdown.lastIndexOf("\n", markerStart - 1) + 1;
+  while (start > 0) {
+    const previousEnd = start - 1;
+    const previousStart = markdown.lastIndexOf("\n", previousEnd - 1) + 1;
+    const line = markdown.slice(previousStart, previousEnd);
+    if (!line.trim().startsWith(">") && line.trim() !== "") break;
+    start = previousStart;
+  }
+  return start;
+}
+
+function findLearningOsCalloutEnd(markdown: string, markerEnd: number): number {
+  let cursor = markerEnd;
+  while (cursor < markdown.length) {
+    const nextBreak = markdown.indexOf("\n", cursor);
+    if (nextBreak === -1) return markdown.length;
+    const nextLineStart = nextBreak + 1;
+    const nextLineEnd = markdown.indexOf("\n", nextLineStart);
+    const line = markdown.slice(nextLineStart, nextLineEnd === -1 ? markdown.length : nextLineEnd);
+    if (!line.trim().startsWith(">") && line.trim() !== "") return nextBreak + 1;
+    cursor = nextLineEnd === -1 ? markdown.length : nextLineEnd;
+  }
+  return markdown.length;
 }
 
 function hasCleanupFindings(plan: OrphanCleanupPlan): boolean {

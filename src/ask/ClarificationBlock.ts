@@ -1,4 +1,5 @@
 import { createClarificationItemId } from "../utils/ids";
+import { sanitizeMathInMarkdown } from "./MarkdownSanitizer";
 import type { ClarificationItem, ClarificationRecord, LearningOsSettings, UiLanguage } from "../types";
 
 export const LEARNOS_CLARIFICATION_ID_PATTERN =
@@ -118,10 +119,14 @@ export function findAllClarificationAnnotations(markdown: string): Clarification
 function itemToCalloutLines(item: ClarificationItem): string[] {
   const title = normalizeClarificationItemTitle(item.itemTitle || item.targetText || item.question);
   const explanation = normalizeClarificationItemExplanation(item.explanation, title);
-  const askIds = item.relatedInteractionIds.length > 0 ? `; ask-ids: ${item.relatedInteractionIds.join(",")}` : "";
-  const marker = `<!-- learnos-item-id: ${item.id}${askIds} -->`;
-  const firstLine = `**${title}**${explanation ? ` ${explanation}` : ""}`.trim();
-  return [`> ${marker}`, ...firstLine.split("\n").map((line) => `> ${line}`)];
+  const marker = `<!-- learnos-item-id: ${item.id} -->`;
+  const explanationLines = explanation
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const firstExplanation = explanationLines.shift() ?? "";
+  const firstLine = `**${title}**${firstExplanation ? ` ${firstExplanation}` : ""}`.trim();
+  return [`> ${marker}`, `> ${firstLine}`, ...explanationLines.map((line) => `> ${line}`)];
 }
 
 export function parseLiveClarificationItemsFromBlock(
@@ -133,7 +138,9 @@ export function parseLiveClarificationItemsFromBlock(
     .filter((line) => line.trim().startsWith(">"))
     .map((line) => line.replace(/^\s*>\s?/, ""))
     .filter((line) => !line.trim().startsWith("[!tip]"))
-    .filter((line) => !line.includes("learnos-clarification-id"));
+    .filter((line) => !line.trim().startsWith("[!note]"))
+    .filter((line) => !line.includes("learnos-clarification-id"))
+    .filter((line) => !line.includes("learnos-generated-id"));
 
   const parsed = splitItemChunks(contentLines)
     .map((chunk, index) => parseLiveItemChunk(chunk.join("\n").trim(), fallback[index], index + 1))
@@ -161,10 +168,6 @@ function splitItemChunks(lines: string[]): string[][] {
       current = [];
     }
     if (!line.trim()) {
-      if (current.length > 0) {
-        chunks.push(current);
-        current = [];
-      }
       continue;
     }
     current.push(line);
@@ -234,7 +237,8 @@ export function normalizeClarificationItemExplanation(value: string, itemTitle?:
     .replace(/<!--\s*learnos-clarification-id:\s*[^>]*-->/g, "")
     .replace(/%%\s*learnos-clarification-id:\s*[^%]*%%/g, "")
     .trim();
-  return itemTitle ? stripLeadingDuplicateTitle(text, itemTitle) : text;
+  const withoutDuplicateTitle = itemTitle ? stripLeadingDuplicateTitle(text, itemTitle) : text;
+  return sanitizeMathInMarkdown(withoutDuplicateTitle);
 }
 
 function stripLeadingDuplicateTitle(value: string, itemTitle: string): string {

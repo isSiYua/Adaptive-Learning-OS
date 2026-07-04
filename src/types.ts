@@ -7,6 +7,7 @@ export type ProviderPreset = "openai" | "deepseek" | "glm-zhipu" | "openrouter" 
 export type FollowUpUpdateMode = "ai-merge" | "append" | "replace";
 export type UiLanguage = "zh" | "en";
 export type AnswerLanguage = "auto" | "zh" | "en";
+export type AskSourceMode = "normal-note" | "clarification-item" | "generated-content-item";
 export type AskJobStatus =
   | "queued"
   | "running"
@@ -60,6 +61,19 @@ export interface SelectionContext {
   sourceStartOffset?: number;
   sourceEndOffset?: number;
   answerLanguage?: AnswerLanguage;
+  askSourceMode?: AskSourceMode;
+  selectedLearningOsItem?: {
+    containerId: string;
+    itemId: string;
+    itemTitle: string;
+    itemContent: string;
+  };
+  siblingLearningOsItems?: Array<{
+    itemId: string;
+    itemTitle: string;
+    itemContent: string;
+  }>;
+  originalSourceBlockBackground?: string;
   sourceSentenceTruncated: boolean;
   originalSelectionLength: number;
 }
@@ -123,8 +137,9 @@ export interface ClarificationUpdateDecision {
 
 export interface ClarificationMergeProposal {
   schemaVersion: number;
-  action: "create-clarification" | "update-item" | "add-item" | "replace-item" | "append-item";
+  action: "create-clarification" | "update-item" | "add-item" | "replace-item" | "append-item" | "generated-content";
   clarificationId?: string;
+  generatedId?: string;
   targetItemId?: string | null;
   operations?: ClarificationMergeOperation[];
   proposedItems: ClarificationItem[];
@@ -181,6 +196,8 @@ export interface AskJob {
   model?: string;
   prompt: string;
   rawAnswer?: string;
+  reviewWarning?: string;
+  applyDisabledReason?: string;
   parsedAnswer?: {
     answer?: string;
     key_answer?: string;
@@ -193,6 +210,14 @@ export interface AskJob {
     message: string;
     code?: string;
     retryable?: boolean;
+    missingClarificationId?: string;
+    missingItemIds?: string[];
+    missingGeneratedId?: string;
+    missingClarificationIds?: string[];
+    missingGeneratedIds?: string[];
+    notePath?: string;
+    sourceBlockHash?: string;
+    targetClarificationId?: string;
   };
 }
 
@@ -256,6 +281,7 @@ export interface AskRequest {
 
 export interface AskResponse {
   rawAnswer: string;
+  answer: string;
   keyAnswer: string;
   suggestedTakeaway: string;
   suggestedMasterySignal: MasterySignal;

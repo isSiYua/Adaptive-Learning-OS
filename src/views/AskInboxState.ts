@@ -41,7 +41,10 @@ export function jobsForGroup(jobs: AskJob[], group: InboxStatusGroup): AskJob[] 
 export function jobsForTab(jobs: AskJob[], tabId: InboxTabId): AskJob[] {
   const tab = INBOX_TABS.find((item) => item.id === tabId);
   if (!tab) return [];
-  return jobs.filter((job) => tab.statuses.includes(job.status));
+  return sortJobsForTab(
+    jobs.filter((job) => tab.statuses.includes(job.status)),
+    tabId
+  );
 }
 
 export function countForTab(jobs: AskJob[], tabId: InboxTabId): number {
@@ -108,6 +111,15 @@ export function nextJobIdInTab(jobs: AskJob[], currentJobId: string, tabId: Inbo
   return tabJobs[currentIndex + 1]?.id ?? tabJobs[currentIndex - 1]?.id ?? null;
 }
 
+export function sortJobsForTab(jobs: AskJob[], tabId: InboxTabId): AskJob[] {
+  const direction = tabId === "ready" ? 1 : -1;
+  return [...jobs].sort((a, b) => {
+    const byTime = a.created.localeCompare(b.created) || a.updated.localeCompare(b.updated);
+    if (byTime !== 0) return byTime * direction;
+    return a.id.localeCompare(b.id) * direction;
+  });
+}
+
 export function isActiveStatus(status: AskJobStatus): boolean {
   return status === "queued" || status === "running" || status === "completed" || status === "failed";
 }
@@ -128,4 +140,8 @@ export function emptyStateKind(jobs: AskJob[]): "none" | "no-jobs" | "only-histo
   if (activeJobs(jobs).length === 0 && historyJobs(jobs).length > 0) return "only-history";
   if (readyCount(jobs) === 0) return "no-ready";
   return "none";
+}
+
+export function displayAnswerForJob(job: AskJob): string {
+  return job.parsedAnswer?.answer?.trim() || job.rawAnswer?.trim() || "";
 }

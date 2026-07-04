@@ -10,6 +10,7 @@ export class ManualClipboardProvider implements AiProvider {
   async ask(request: AskRequest): Promise<AskResponse> {
     return {
       rawAnswer: buildAskPrompt(request),
+      answer: "",
       keyAnswer: "",
       suggestedTakeaway: "",
       suggestedMasterySignal: "neutral",

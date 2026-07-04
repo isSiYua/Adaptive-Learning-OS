@@ -1,3 +1,5 @@
+import { extractFirstJsonObject } from "./JsonExtraction";
+import { latexMathFormattingRule, structuredJsonOutputRule } from "./PromptRules";
 import type {
   AnswerLanguage,
   AskInteraction,
@@ -31,6 +33,8 @@ Your task:
 
 ${answerLanguageInstruction(params.answerLanguage)}
 
+${latexMathFormattingRule(params.answerLanguage)}
+
 ## Source block
 
 ${params.record.sourceBlock}
@@ -55,6 +59,8 @@ ${params.rawAnswer}
 
 Return valid JSON only.
 
+${structuredJsonOutputRule(params.answerLanguage)}
+
 {
   "action": "update-item | add-item",
   "target_item_id": "existing item id if update-item, otherwise null",
@@ -71,7 +77,7 @@ Return valid JSON only.
 }
 
 export function parseClarificationUpdateDecision(input: string): ClarificationUpdateDecision | null {
-  const jsonText = extractJsonObject(input);
+  const jsonText = extractFirstJsonObject(input);
   if (!jsonText) return null;
 
   try {
@@ -180,16 +186,6 @@ function createItemId(title: string, index: number): string {
     .replace(/^-+|-+$/g, "")
     .slice(0, 32);
   return `item-${slug || index}`;
-}
-
-function extractJsonObject(input: string): string | null {
-  const trimmed = input.trim();
-  const fenced = /```(?:json)?\s*([\s\S]*?)```/i.exec(trimmed);
-  const source = fenced ? fenced[1].trim() : trimmed;
-  const start = source.indexOf("{");
-  const end = source.lastIndexOf("}");
-  if (start === -1 || end === -1 || end <= start) return null;
-  return source.slice(start, end + 1);
 }
 
 function stringField(value: unknown): string | undefined {

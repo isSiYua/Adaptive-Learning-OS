@@ -1,3 +1,5 @@
+import { extractFirstJsonObject } from "./JsonExtraction";
+import { latexMathFormattingRule, structuredJsonOutputRule } from "./PromptRules";
 import type { AskCardRecord, SelectionContext } from "../types";
 
 export interface FollowUpMergeRequest {
@@ -22,6 +24,8 @@ export function buildFollowUpMergePrompt(request: FollowUpMergeRequest): string 
 You are updating a concise learning clarification in an Obsidian note.
 
 Answer in Chinese.
+
+${latexMathFormattingRule("zh")}
 
 The user asked a follow-up question about an existing clarification.
 
@@ -59,6 +63,8 @@ ${request.newTakeaway || request.newKeyAnswer || request.newRawAnswer}
 8. If the old takeaway contains a useful comparison, keep it.
 9. Return valid JSON only.
 
+${structuredJsonOutputRule("zh")}
+
 ## Required JSON format
 
 {
@@ -71,7 +77,7 @@ ${request.newTakeaway || request.newKeyAnswer || request.newRawAnswer}
 }
 
 export function parseFollowUpMergeResponse(input: string): ParsedFollowUpMerge | null {
-  const jsonText = extractJsonObject(input);
+  const jsonText = extractFirstJsonObject(input);
   if (!jsonText) return null;
 
   try {
@@ -97,18 +103,6 @@ export function appendTakeaways(existingTakeaway: string, newTakeaway: string): 
   if (!next || existing.includes(next)) return existing;
   if (next.includes(existing)) return next;
   return `${existing}\n\n补充：${next}`;
-}
-
-function extractJsonObject(input: string): string | null {
-  const trimmed = input.trim();
-  if (!trimmed) return null;
-
-  const fenced = /```(?:json)?\s*([\s\S]*?)```/i.exec(trimmed);
-  const source = fenced ? fenced[1].trim() : trimmed;
-  const start = source.indexOf("{");
-  const end = source.lastIndexOf("}");
-  if (start === -1 || end === -1 || end <= start) return null;
-  return source.slice(start, end + 1);
 }
 
 function stringField(value: unknown): string | undefined {

@@ -5,8 +5,11 @@ import {
   normalizeClarificationItemTitle,
   parseLiveClarificationItemsFromBlock,
 } from "./ClarificationBlock";
+import { detectAskIntent, generatedContentMissingWarning, isGeneratedContentIntent } from "./AskIntent";
 import { answerLanguageInstruction } from "./ClarificationUpdatePromptBuilder";
-import { createClarificationId } from "../utils/ids";
+import { extractFirstJsonObject } from "./JsonExtraction";
+import { latexMathFormattingRule, structuredJsonOutputRule } from "./PromptRules";
+import { createClarificationId, createGeneratedContentId, slugify } from "../utils/ids";
 import { toLocalIsoString } from "../utils/dates";
 import type {
   AskInteraction,
@@ -34,6 +37,8 @@ Your job is to create a proposal, not directly apply it.
 
 ${answerLanguageInstruction(params.answerLanguage)}
 
+${latexMathFormattingRule(params.answerLanguage)}
+
 ## Source block
 
 ${params.job.sourceBlock}
@@ -54,9 +59,17 @@ ${params.job.selectedText}
 
 ${params.job.userQuestion}
 
+## User intent hint
+
+${detectAskIntent(params.job.userQuestion)}
+
 ## AI answer to the new question
 
 ${params.rawAnswer}
+
+## Parsed answer fields, if available
+
+${JSON.stringify(params.job.parsedAnswer ?? {}, null, 2)}
 
 ## Instructions
 
@@ -71,6 +84,13 @@ ${params.rawAnswer}
 9. Keep technical terms in English when natural.
 10. Do not include backend metadata.
 11. Return valid JSON only.
+12. The user's question is a primary instruction. Do not ignore user-requested content just because it is not directly part of the source paragraph.
+13. If the AI answer contains user-requested generated content, examples, translations, formulas, stories, or test content, preserve it as a concise item or full item.
+14. If you believe user-requested content is not suitable for the note, say that explicitly in the proposal reasoning and still include a user-reviewable item instead of silently dropping it.
+
+用户的问题是主要指令之一。不要因为内容和原文段落不完全相关，就静默丢弃用户明确要求生成的内容。如果 AI 回答中包含用户明确要求的故事、例子、翻译、公式或测试内容，编辑建议必须保留它，至少保留为一个简洁 item。不能静默忽略。
+
+${structuredJsonOutputRule(params.answerLanguage)}
 
 ## Required JSON
 
@@ -84,7 +104,7 @@ ${params.rawAnswer}
       "explanation": "final explanation text"
     }
   ],
-  "action": "create-clarification | update-item | add-item | replace-item | append-item",
+    "action": "create-clarification | update-item | add-item | replace-item | append-item | generated-content",
   "target_item_id": "item id or null",
   "proposed_items": [
     {
@@ -118,6 +138,8 @@ Your job is to preserve current content and merge the pending answer without ove
 
 ${answerLanguageInstruction(params.answerLanguage)}
 
+${latexMathFormattingRule(params.answerLanguage)}
+
 ## Source block
 
 ${params.job.sourceBlock}
@@ -144,6 +166,8 @@ ${params.staleProposalMarkdown}
 
 Return valid JSON only using the same schema as the merge proposal:
 
+${structuredJsonOutputRule(params.answerLanguage)}
+
 {
   "operations": [],
   "action": "update-item | add-item | replace-item | append-item",
@@ -157,7 +181,7 @@ Return valid JSON only using the same schema as the merge proposal:
 }
 
 export function parseClarificationMergeProposal(input: string): ClarificationMergeProposal | null {
-  const jsonText = extractJsonObject(input);
+  const jsonText = extractFirstJsonObject(input);
   if (!jsonText) return null;
 
   try {
@@ -176,6 +200,7 @@ export function parseClarificationMergeProposal(input: string): ClarificationMer
       schemaVersion: 1,
       action,
       clarificationId: stringField(parsed.clarification_id),
+      generatedId: stringField(parsed.generated_id),
       targetItemId: stringField(parsed.target_item_id) ?? null,
       operations,
       proposedItems,
@@ -195,10 +220,18 @@ export function createFallbackMergeProposal(params: {
   nowIso?: string;
 }): ClarificationMergeProposal {
   const nowIso = params.nowIso ?? toLocalIsoString();
+  const intent = detectAskIntent(params.job.userQuestion);
+  const generatedWarning = generatedContentMissingWarning(params.job.userQuestion, params.explanation);
+  const generated = isGeneratedContentIntent(intent);
+  const generatedTitle = generated ? generatedContentTitle(params.job.userQuestion, params.job.selectedText) : null;
   const item: ClarificationItem = {
-    id: params.job.proposedItemId ?? createItemId(params.job.userQuestion || params.job.selectedText, 1),
+    id:
+      params.job.proposedItemId ??
+      (generated
+        ? `gen-${slugify((generatedTitle ?? params.job.userQuestion) || params.job.selectedText, "content")}`
+        : createItemId(params.job.userQuestion || params.job.selectedText, 1)),
     targetText: params.job.selectedText,
-    itemTitle: params.job.userQuestion || params.job.selectedText,
+    itemTitle: generatedTitle ?? params.job.userQuestion ?? params.job.selectedText,
     question: params.job.userQuestion,
     explanation: params.explanation,
     created: nowIso,
@@ -208,23 +241,61 @@ export function createFallbackMergeProposal(params: {
 
   return {
     schemaVersion: 1,
-    action: params.existingRecord ? "add-item" : "create-clarification",
+    action: generated ? "generated-content" : params.existingRecord ? "add-item" : "create-clarification",
+    generatedId: generated
+      ? createGeneratedContentId(params.job.detectedConcept ?? params.job.selectedText ?? "content")
+      : undefined,
     clarificationId: params.existingRecord?.id,
     targetItemId: null,
-    proposedItems: params.existingRecord ? [...params.existingRecord.items, item] : [item],
-    operations: [
-      {
-        op: params.existingRecord ? "add-item" : "add-item",
-        itemId: item.id,
-        targetText: item.targetText,
-        itemTitle: item.itemTitle,
-        explanation: item.explanation,
-      },
-    ],
-    proposedVisibleMarkdown: "",
-    reasoning: "Fallback proposal created from the AI answer.",
+    proposedItems: generatedWarning && generated ? [] : params.existingRecord ? [...params.existingRecord.items, item] : [item],
+    operations:
+      generatedWarning && generated
+        ? []
+        : [
+            {
+              op: "add-item",
+              itemId: item.id,
+              targetText: item.targetText,
+              itemTitle: item.itemTitle,
+              explanation: item.explanation,
+            },
+          ],
+    proposedVisibleMarkdown: generatedWarning && generated ? "" : "",
+    reasoning: generatedWarning ?? "Fallback proposal created from the AI answer.",
     confidence: "low",
   };
+}
+
+export function primaryProposalSourceText(job: AskJob): string {
+  const intent = detectAskIntent(job.userQuestion);
+
+  if (isGeneratedContentIntent(intent)) {
+    return generatedContentTextForJob(job);
+  }
+
+  const rawAnswer = job.rawAnswer?.trim() ?? "";
+  const parsedAnswer = job.parsedAnswer?.answer?.trim() ?? "";
+  const keyAnswer = job.parsedAnswer?.key_answer?.trim() ?? "";
+  const suggestedTakeaway = job.parsedAnswer?.suggested_takeaway?.trim() ?? "";
+  return parsedAnswer || rawAnswer || suggestedTakeaway || keyAnswer;
+}
+
+export function normalizeProposalForAskIntent(params: {
+  job: AskJob;
+  existingRecord: ClarificationRecord | null;
+  proposal: ClarificationMergeProposal;
+  explanation: string;
+}): ClarificationMergeProposal {
+  const intent = detectAskIntent(params.job.userQuestion);
+  if (!isGeneratedContentIntent(intent)) return params.proposal;
+  return createFallbackMergeProposal({
+    job: {
+      ...params.job,
+      proposedItemId: params.job.proposedItemId ?? undefined,
+    },
+    existingRecord: null,
+    explanation: generatedContentTextForJob(params.job) || params.explanation,
+  });
 }
 
 export function recordFromMergeProposal(params: {
@@ -273,8 +344,40 @@ export function proposalPreviewMarkdown(params: {
   existingRecord: ClarificationRecord | null;
   settings: Pick<LearningOsSettings, "uiLanguage" | "answerLanguage">;
 }): string {
+  if (params.proposal.action === "generated-content") {
+    return buildGeneratedContentBlock(params.proposal, params.settings);
+  }
   const record = recordFromMergeProposal(params);
   return buildClarificationBlock(record, params.settings);
+}
+
+export function buildGeneratedContentBlock(
+  proposal: Pick<ClarificationMergeProposal, "generatedId" | "proposedItems">,
+  settings?: Pick<LearningOsSettings, "uiLanguage">
+): string {
+  const validItems = proposal.proposedItems.filter(
+    (item) =>
+      (item.id || item.itemTitle || item.targetText) &&
+      normalizeClarificationItemExplanation(item.explanation, item.itemTitle || item.targetText).trim().length > 0
+  );
+  if (validItems.length === 0) return "";
+  const title = settings?.uiLanguage === "en" ? "AI generated content" : "AI 生成内容";
+  const generatedId = proposal.generatedId ?? createGeneratedContentId("content");
+  const lines = [`> [!note]- ✍️ ${title}`, `> <!-- learnos-generated-id: ${generatedId} -->`];
+  for (const item of validItems) {
+    const itemTitle = normalizeClarificationItemTitle(item.itemTitle || item.targetText || item.question || "Generated content");
+    const explanation = normalizeClarificationItemExplanation(item.explanation, itemTitle);
+    lines.push(">");
+    lines.push(`> <!-- learnos-item-id: ${item.id} -->`);
+    const explanationLines = explanation
+      .split(/\n+/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+    const firstExplanation = explanationLines.shift() ?? "";
+    lines.push(`> ${`**${itemTitle}**${firstExplanation ? ` ${firstExplanation}` : ""}`.trim()}`);
+    lines.push(...explanationLines.map((line) => `> ${line}`));
+  }
+  return `${lines.join("\n")}\n\n`;
 }
 
 export function proposalFromEditedMarkdown(params: {
@@ -285,6 +388,7 @@ export function proposalFromEditedMarkdown(params: {
   return {
     ...params.proposal,
     proposedItems: items.length > 0 ? items : params.proposal.proposedItems,
+    operations: items.length > 0 ? undefined : params.proposal.operations,
     proposedVisibleMarkdown: params.editedMarkdown,
   };
 }
@@ -468,14 +572,17 @@ function operationsToItems(operations: ClarificationMergeOperation[]): Clarifica
 }
 
 function parseItemsFromVisibleMarkdown(markdown: string, fallback: ClarificationItem[]): ClarificationItem[] {
-  const liveItems = liveItemsToClarificationItems(parseLiveClarificationItemsFromBlock(markdown, fallback));
+  const liveItems = liveItemsToClarificationItems(parseLiveClarificationItemsFromBlock(markdown, []));
   if (liveItems.length > 0) return liveItems;
 
   const text = markdown
     .split("\n")
-    .filter((line) => line.trim().startsWith(">"))
     .map((line) => line.replace(/^\s*>\s?/, ""))
-    .filter((line) => !line.startsWith("[!tip]"))
+    .filter((line) => !line.trim().startsWith("[!tip]"))
+    .filter((line) => !line.trim().startsWith("[!note]"))
+    .filter((line) => !line.includes("learnos-clarification-id"))
+    .filter((line) => !line.includes("learnos-generated-id"))
+    .filter((line) => !line.includes("learnos-item-id"))
     .join("\n")
     .trim();
   if (!text) return [];
@@ -505,7 +612,8 @@ function proposalAction(value: unknown): ClarificationMergeProposal["action"] | 
     value === "update-item" ||
     value === "add-item" ||
     value === "replace-item" ||
-    value === "append-item"
+    value === "append-item" ||
+    value === "generated-content"
   ) {
     return value;
   }
@@ -514,16 +622,6 @@ function proposalAction(value: unknown): ClarificationMergeProposal["action"] | 
 
 function confidenceValue(value: unknown): ClarificationMergeProposal["confidence"] | undefined {
   return value === "low" || value === "medium" || value === "high" ? value : undefined;
-}
-
-function extractJsonObject(input: string): string | null {
-  const trimmed = input.trim();
-  const fenced = /```(?:json)?\s*([\s\S]*?)```/i.exec(trimmed);
-  const source = fenced ? fenced[1].trim() : trimmed;
-  const start = source.indexOf("{");
-  const end = source.lastIndexOf("}");
-  if (start === -1 || end === -1 || end <= start) return null;
-  return source.slice(start, end + 1);
 }
 
 function createItemId(title: string, index: number): string {
@@ -541,4 +639,26 @@ function interactionIdForJob(jobId: string): string {
 
 function stringField(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
+}
+
+function generatedContentTextForJob(job: AskJob): string {
+  const candidates = [
+    job.parsedAnswer?.answer?.trim() ?? "",
+    job.parsedAnswer?.suggested_takeaway?.trim() ?? "",
+    job.parsedAnswer?.key_answer?.trim() ?? "",
+    job.rawAnswer?.trim() ?? "",
+  ].filter(Boolean);
+  const satisfying = candidates.find((candidate) => generatedContentMissingWarning(job.userQuestion, candidate) === null);
+  return satisfying ?? candidates[0] ?? "";
+}
+
+function generatedContentTitle(question: string, fallback: string): string {
+  const cleaned = question
+    .replace(/请|给我|生成一个|生成一段|生成|讲一个|讲个|讲一段|讲讲|给我讲|写一个|写一段|给我写|编一个|编一段|来一个|输出|关于|一下/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const base = cleaned || fallback || "生成内容";
+  if (/niko/i.test(base) && /趣事|fun fact/i.test(base)) return "NiKo 小趣事";
+  if (/巴别塔|通天塔|babel/i.test(base) && /故事|story/i.test(base)) return "巴别塔小故事";
+  return normalizeClarificationItemTitle(base);
 }

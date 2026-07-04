@@ -54,7 +54,8 @@ test("clarification block renders one Chinese item with clarification marker", (
   assert.match(block, /> \[!tip\]- 💡 我的理解/);
   assert.match(block, /> <!-- learnos-clarification-id: clar-20260703-loocv -->/);
   assert.match(block, /\*\*为什么叫“无偏（unbiased）”？\*\*/);
-  assert.match(block, /> <!-- learnos-item-id: item-unbiased; ask-ids: ask-1 -->\n> \*\*为什么叫“无偏（unbiased）”？/);
+  assert.match(block, /> <!-- learnos-item-id: item-unbiased -->\n> \*\*为什么叫“无偏（unbiased）”？/);
+  assert.doesNotMatch(block, /ask-ids:/);
   assert.equal(block.includes("learnos-ask-id"), false);
 });
 

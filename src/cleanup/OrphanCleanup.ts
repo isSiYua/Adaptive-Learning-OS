@@ -77,6 +77,7 @@ export function buildOrphanCleanupPlan(params: {
   const liveMarkers = extractLiveClarificationMarkers(params.markdownFiles);
   const liveItemIdsByClarificationId = extractLiveItemIdsByClarificationId(params.markdownFiles);
   const liveAskIdsByClarificationId = extractLiveAskIdsByClarificationId(params.markdownFiles);
+  addBackendAskIdsForLiveItems(liveAskIdsByClarificationId, liveItemIdsByClarificationId, params.clarificationRecords);
   const liveAskIds = unionSets(Array.from(liveAskIdsByClarificationId.values()));
   const liveClarificationIds = new Set(liveMarkers.map((marker) => marker.id));
   const recordIds = new Set(params.clarificationRecords.map((record) => record.id));
@@ -216,12 +217,33 @@ export function targetItemIds(job: AskJob): string[] {
   collectItemIdValue(job.appliedItemIds, ids);
   collectItemIdValue(job.mergeProposal?.targetItemId, ids);
   collectItemIdValue(job.mergeProposal?.operations, ids);
+  collectItemIdValue(job.mergeProposal?.proposedItems, ids);
+  collectItemMarkerIds(job.mergeProposal?.proposedVisibleMarkdown, ids);
   const dynamicJob = job as unknown as Record<string, unknown>;
   collectItemIdValue(dynamicJob.itemId, ids);
   collectItemIdValue(dynamicJob.targetItemId, ids);
   collectItemIdValue(dynamicJob.relatedItemIds, ids);
   collectItemIdValue(dynamicJob.appliedItemIds, ids);
   return Array.from(ids);
+}
+
+function addBackendAskIdsForLiveItems(
+  liveAskIdsByClarificationId: Map<string, Set<string>>,
+  liveItemIdsByClarificationId: Map<string, Set<string>>,
+  clarificationRecords: ClarificationRecord[]
+): void {
+  for (const record of clarificationRecords) {
+    const liveItemIds = liveItemIdsByClarificationId.get(record.id);
+    if (!liveItemIds) continue;
+    const askIds = liveAskIdsByClarificationId.get(record.id) ?? new Set<string>();
+    for (const item of record.items) {
+      if (!liveItemIds.has(item.id)) continue;
+      for (const askId of item.relatedInteractionIds) {
+        askIds.add(askId);
+      }
+    }
+    liveAskIdsByClarificationId.set(record.id, askIds);
+  }
 }
 
 export function askIdsForJob(job: AskJob): string[] {

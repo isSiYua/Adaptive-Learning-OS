@@ -1,3 +1,4 @@
+import { extractFirstJsonObject } from "./JsonExtraction";
 import type { MasterySignal } from "../types";
 
 export interface ParsedAiResponseJson {
@@ -10,7 +11,7 @@ export interface ParsedAiResponseJson {
 }
 
 export function parseAiResponseJson(input: string): ParsedAiResponseJson | null {
-  const jsonText = extractJsonObject(input);
+  const jsonText = extractFirstJsonObject(input);
   if (!jsonText) return null;
 
   try {
@@ -45,20 +46,6 @@ export function parseAiResponseOrFallback(input: string): ParsedAiResponseJson {
       parsed: false,
     }
   );
-}
-
-function extractJsonObject(input: string): string | null {
-  const trimmed = input.trim();
-  if (!trimmed) return null;
-
-  const fenced = /```(?:json)?\s*([\s\S]*?)```/i.exec(trimmed);
-  const unfenced = fenced ? fenced[1].trim() : trimmed;
-
-  const start = unfenced.indexOf("{");
-  const end = unfenced.lastIndexOf("}");
-  if (start === -1 || end === -1 || end <= start) return null;
-
-  return unfenced.slice(start, end + 1);
 }
 
 function stringField(value: unknown): string | undefined {

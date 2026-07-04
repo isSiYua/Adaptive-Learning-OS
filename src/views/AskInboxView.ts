@@ -1,8 +1,9 @@
-import { ItemView, Notice, TFile, WorkspaceLeaf } from "obsidian";
+import { ItemView, MarkdownRenderer, MarkdownView, Notice, TFile, WorkspaceLeaf } from "obsidian";
 import {
   INBOX_STATUS_GROUPS,
   INBOX_TABS,
   actionSetForJob,
+  displayAnswerForJob,
   emptyStateKind,
   jobsForGroup,
   jobsForTab,
@@ -11,6 +12,8 @@ import {
   readyCount,
   resolveSelectedJobIdForTab,
 } from "./AskInboxState";
+import { findSourceAnchor } from "./AskSourceNavigation";
+import { generatedContentMissingWarning } from "../ask/AskIntent";
 import type AdaptiveLearningOsPlugin from "../main";
 import type { AskJob } from "../types";
 import type { InboxTabId } from "./AskInboxState";
@@ -22,6 +25,7 @@ export class AskInboxView extends ItemView {
   private showHistory = false;
   private activeTab: InboxTabId = "ready";
   private currentJobs: AskJob[] = [];
+  private proposalDrafts = new Map<string, string>();
 
   constructor(leaf: WorkspaceLeaf, private plugin: AdaptiveLearningOsPlugin) {
     super(leaf);
@@ -129,9 +133,10 @@ export class AskInboxView extends ItemView {
     const tabJobs = jobsForTab(this.currentJobs, this.activeTab);
     const tab = INBOX_TABS.find((item) => item.id === this.activeTab);
     const label = tab ? this.plugin.t(tab.zh, tab.en) : this.plugin.t("待处理", "Ready");
+    const selectedJob = this.selectedJobId ? this.currentJobs.find((job) => job.id === this.selectedJobId) : null;
 
     const selectedIndex = tabJobs.findIndex((job) => job.id === this.selectedJobId);
-    const nav = parent.createDiv({ cls: "learning-os-current-nav" });
+    const nav = parent.createDiv({ cls: "learning-os-current-nav learning-os-job-action-bar--sticky" });
     nav.createEl("strong", {
       text: `${label} (${tabJobs.length === 0 ? 0 : Math.max(0, selectedIndex + 1)}/${tabJobs.length})`,
     });
@@ -150,6 +155,20 @@ export class AskInboxView extends ItemView {
         this.selectedJobId = tabJobs[selectedIndex + 1].id;
         await this.refresh();
       }
+    });
+    const applyButton = nav.createEl("button", {
+      text: this.plugin.t("应用建议", "Apply proposal"),
+      cls: "mod-cta",
+    });
+    applyButton.disabled =
+      this.activeTab !== "ready" ||
+      !selectedJob ||
+      selectedJob.status !== "completed" ||
+      Boolean(selectedJob.applyDisabledReason) ||
+      Boolean(generatedContentMissingWarning(selectedJob.userQuestion, selectedJob.parsedAnswer?.answer ?? selectedJob.rawAnswer ?? ""));
+    applyButton.addEventListener("click", async () => {
+      if (!selectedJob || selectedJob.status !== "completed") return;
+      await this.applyReadyJob(selectedJob, this.proposalDrafts.get(selectedJob.id));
     });
   }
 
@@ -219,8 +238,29 @@ export class AskInboxView extends ItemView {
 
   private renderReadyDetail(parent: HTMLElement, job: AskJob): void {
     const card = this.createDetailCard(parent, job);
-    this.copyableArea(card, this.plugin.t("AI 回答", "AI answer"), job.rawAnswer ?? "", "learning-os-ai-answer", this.plugin.t("复制 AI 回答", "Copy AI answer"));
-    this.copyableArea(
+    const warningEl = card.createDiv({ cls: "learning-os-readonly learning-os-review-warning" });
+    const setWarning = (message?: string) => {
+      warningEl.setText(message ?? "");
+      warningEl.style.display = message ? "" : "none";
+    };
+    const generationWarning = (nextJob: AskJob) =>
+      generatedContentMissingWarning(nextJob.userQuestion, nextJob.parsedAnswer?.answer ?? nextJob.rawAnswer ?? "");
+    const combinedWarning = (nextJob: AskJob) =>
+      [nextJob.reviewWarning, nextJob.applyDisabledReason, generationWarning(nextJob)].filter(Boolean).join("\n\n") ||
+      undefined;
+    setWarning(
+      combinedWarning(job)
+    );
+    this.markdownCopyableArea(
+      card,
+      this.plugin.t("AI 回答", "AI answer"),
+      displayAnswerForJob(job),
+      "learning-os-ai-answer",
+      this.plugin.t("复制 AI 回答", "Copy AI answer"),
+      job,
+      job.rawAnswer ?? ""
+    );
+    this.markdownCopyableArea(
       card,
       this.plugin.t("解析结果", "Parsed answer"),
       [
@@ -232,50 +272,82 @@ export class AskInboxView extends ItemView {
         .filter(Boolean)
         .join("\n"),
       "learning-os-parsed-result",
-      this.plugin.t("复制解析结果", "Copy parsed result")
+      this.plugin.t("复制解析结果", "Copy parsed result"),
+      job
     );
-    this.copyableArea(
+    this.markdownCopyableArea(
       card,
       this.plugin.t("合并理由", "Merge reason"),
       job.mergeProposal?.reasoning ?? "",
       "learning-os-merge-reason",
-      this.plugin.t("复制合并理由", "Copy merge reason")
+      this.plugin.t("复制合并理由", "Copy merge reason"),
+      job
     );
 
     const field = card.createDiv({ cls: "learning-os-field" });
-    field.createEl("label", { text: this.plugin.t("编辑建议", "Edit proposal") });
+    const proposalHeader = field.createDiv({ cls: "learning-os-copyable-header" });
+    proposalHeader.createEl("label", { text: this.plugin.t("编辑建议", "Edit proposal") });
+    const proposalPreview = field.createDiv({ cls: "learning-os-markdown-rendered learning-os-markdown-preview learning-os-proposal-preview" });
     const proposalEl = field.createEl("textarea", {
       cls: "learning-os-textarea learning-os-proposal-editor",
     });
-    proposalEl.value = job.mergeProposal?.proposedVisibleMarkdown ?? "";
-    field.createEl("button", { text: this.plugin.t("复制编辑建议", "Copy proposal") }).addEventListener("click", async () => {
+    proposalEl.value = this.proposalDrafts.get(job.id) ?? job.mergeProposal?.proposedVisibleMarkdown ?? "";
+    proposalEl.addEventListener("input", () => {
+      this.proposalDrafts.set(job.id, proposalEl.value);
+    });
+    proposalHeader.createEl("button", { text: this.plugin.t("复制编辑建议", "Copy proposal") }).addEventListener("click", async () => {
       await this.copyText(proposalEl.value, this.plugin.t("编辑建议已复制。", "Proposal copied."));
     });
-
+    proposalHeader.createEl("button", { text: this.plugin.t("刷新预览", "Refresh preview") }).addEventListener("click", () => {
+      void this.renderMarkdownPreview(proposalPreview, proposalEl.value, job.notePath);
+    });
+    void this.renderMarkdownPreview(proposalPreview, proposalEl.value, job.notePath);
     const actions = card.createDiv({ cls: "learning-os-actions" });
-    actions
-      .createEl("button", { text: this.plugin.t("应用建议", "Apply proposal"), cls: "mod-cta" })
-      .addEventListener("click", async () => {
-        try {
-          const nextSelected = nextReadyJobIdAfterApply(this.currentJobs, job.id);
-          const result = await this.plugin.applyAskJob(job, proposalEl.value);
-          this.selectedJobId = nextSelected;
-          new Notice(
-            result.safeMerged
-              ? this.plugin.t("检测到旧建议，已安全合并到当前内容。", "Stale proposal safely merged into current content.")
-              : this.plugin.t("建议已应用到笔记。", "Proposal applied to note.")
-          );
-          await this.refresh();
-        } catch (error) {
-          new Notice(error instanceof Error ? error.message : "Apply failed.");
-        }
+    const applyButton = actions.createEl("button", { text: this.plugin.t("应用建议", "Apply proposal"), cls: "mod-cta" });
+    const updateApplyButton = (nextJob: AskJob) => {
+      applyButton.disabled = Boolean(nextJob.applyDisabledReason || generationWarning(nextJob));
+    };
+    updateApplyButton(job);
+    applyButton.addEventListener("click", async () => {
+      await this.applyReadyJob(job, proposalEl.value);
+    });
+    if (!this.proposalDrafts.has(job.id)) {
+      void this.plugin.liveAwarePreviewJob(job).then((previewJob) => {
+        if (this.selectedJobId !== job.id || this.proposalDrafts.has(job.id)) return;
+        const liveProposal = previewJob.mergeProposal?.proposedVisibleMarkdown ?? proposalEl.value;
+        proposalEl.value = liveProposal;
+        this.proposalDrafts.set(job.id, liveProposal);
+        setWarning(combinedWarning(previewJob));
+        updateApplyButton(previewJob);
+        void this.renderMarkdownPreview(proposalPreview, liveProposal, job.notePath);
       });
+    }
     actions
       .createEl("button", { text: this.plugin.t("编辑建议", "Edit proposal") })
       .addEventListener("click", () => proposalEl.focus());
     actions
+      .createEl("button", { text: this.plugin.t("重新按问题生成", "Regenerate for question") })
+      .addEventListener("click", async () => {
+        this.proposalDrafts.delete(job.id);
+        await this.plugin.retryAskJob(job);
+        await this.refresh();
+      });
+    actions
       .createEl("button", { text: this.plugin.t("让 AI 重新合并", "Ask AI to re-merge") })
       .addEventListener("click", async () => {
+        if (
+          this.proposalDrafts.has(job.id) &&
+          this.proposalDrafts.get(job.id) !== (job.mergeProposal?.proposedVisibleMarkdown ?? "") &&
+          !confirm(
+            this.plugin.t(
+              "你已经手动修改了编辑建议。重新合并会覆盖这些修改，是否继续？",
+              "You have manually edited the proposal. Re-merge will overwrite those edits. Continue?"
+            )
+          )
+        ) {
+          return;
+        }
+        this.proposalDrafts.delete(job.id);
         await this.plugin.remergeAskJob(job);
         await this.refresh();
       });
@@ -396,12 +468,7 @@ export class AskInboxView extends ItemView {
     actions.createEl("button", { text: this.plugin.t("打开原文", "Open source note") }).addEventListener(
       "click",
       async () => {
-        const file = this.app.vault.getAbstractFileByPath(job.notePath);
-        if (file instanceof TFile) {
-          await this.app.workspace.getLeaf(false).openFile(file);
-        } else {
-          new Notice(`Source note not found: ${job.notePath}`);
-        }
+        await this.openSourceForJob(job);
       }
     );
     if (showArchive) {
@@ -462,6 +529,100 @@ export class AskInboxView extends ItemView {
     textarea.value = value || "";
     textarea.readOnly = true;
     return textarea;
+  }
+
+  private markdownCopyableArea(
+    parent: HTMLElement,
+    label: string,
+    value: string,
+    extraClass: string,
+    copyLabel: string,
+    job: AskJob,
+    rawValue = value
+  ): HTMLElement {
+    const field = parent.createDiv({ cls: "learning-os-field" });
+    const header = field.createDiv({ cls: "learning-os-copyable-header" });
+    header.createEl("label", { text: label });
+    header.createEl("button", { text: copyLabel }).addEventListener("click", async () => {
+      await this.copyText(value, this.plugin.t("已复制。", "Copied."));
+    });
+    const rendered = field.createDiv({
+      cls: `learning-os-markdown-rendered learning-os-markdown-preview ${extraClass}`,
+    });
+    void this.renderMarkdownPreview(rendered, value || "(empty)", job.notePath);
+    const raw = field.createEl("details", { cls: "learning-os-raw-details" });
+    const rawSummary = raw.createEl("summary", { text: this.plugin.t("Raw 原文", "Raw") });
+    rawSummary.createEl("button", { text: this.plugin.t("复制 Raw", "Copy raw") }).addEventListener("click", async (event) => {
+      event.preventDefault();
+      await this.copyText(rawValue, this.plugin.t("Raw 已复制。", "Raw copied."));
+    });
+    const textarea = raw.createEl("textarea", {
+      cls: `learning-os-textarea learning-os-large-textarea learning-os-copyable-block ${extraClass}`,
+    });
+    textarea.value = rawValue || "";
+    textarea.readOnly = true;
+    return rendered;
+  }
+
+  private async renderMarkdownPreview(container: HTMLElement, value: string, sourcePath: string): Promise<void> {
+    container.empty();
+    await MarkdownRenderer.render(this.app, value || "(empty)", container, sourcePath, this);
+  }
+
+  private async openSourceForJob(job: AskJob): Promise<void> {
+    const file = this.app.vault.getAbstractFileByPath(job.notePath);
+    if (!(file instanceof TFile)) {
+      new Notice(`Source note not found: ${job.notePath}`);
+      return;
+    }
+
+    const markdown = await this.app.vault.read(file);
+    const anchor = findSourceAnchor(markdown, job);
+    const leaf = this.app.workspace.getLeaf(false);
+    await leaf.openFile(file);
+    const view = leaf.view instanceof MarkdownView ? leaf.view : this.app.workspace.getActiveViewOfType(MarkdownView);
+
+    if (view && anchor.kind !== "none") {
+      const position = { line: anchor.line, ch: anchor.ch };
+      view.editor.setCursor(position);
+      view.editor.scrollIntoView({ from: position, to: position }, true);
+      view.editor.focus();
+    }
+
+    if (anchor.kind === "item") {
+      new Notice(this.plugin.t("已定位到对应的理解项。", "Jumped to the related clarification item."));
+      return;
+    }
+    if (anchor.kind === "clarification") {
+      new Notice(this.plugin.t("未找到具体 item，已定位到理解块。", "Item anchor not found; jumped to the clarification block."));
+      return;
+    }
+    if (anchor.kind === "source-offset" || anchor.kind === "selected-text") {
+      new Notice(this.plugin.t("已定位到原文附近。", "Jumped near the source text."));
+      return;
+    }
+    new Notice(this.plugin.t("未找到对应位置，已打开原文。", "Could not find the anchor; opened the source note."));
+  }
+
+  private async applyReadyJob(job: AskJob, editedVisibleMarkdown?: string): Promise<void> {
+    try {
+      if (job.applyDisabledReason) {
+        new Notice(job.applyDisabledReason);
+        return;
+      }
+      const nextSelected = nextReadyJobIdAfterApply(this.currentJobs, job.id);
+      const result = await this.plugin.applyAskJob(job, editedVisibleMarkdown ?? job.mergeProposal?.proposedVisibleMarkdown ?? "");
+      this.proposalDrafts.delete(job.id);
+      this.selectedJobId = nextSelected;
+      new Notice(
+        result.safeMerged
+          ? this.plugin.t("检测到旧建议，已安全合并到当前内容。", "Stale proposal safely merged into current content.")
+          : this.plugin.t("建议已应用到笔记。", "Proposal applied to note.")
+      );
+      await this.refresh();
+    } catch (error) {
+      new Notice(error instanceof Error ? error.message : "Apply failed.");
+    }
   }
 
   private async copyText(value: string, message: string): Promise<void> {
