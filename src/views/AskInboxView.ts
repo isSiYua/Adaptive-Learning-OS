@@ -333,6 +333,17 @@ export class AskInboxView extends ItemView {
         await this.refresh();
       });
     actions
+      .createEl("button", { text: this.plugin.t("使用 Pro 重新生成", "Regenerate with Pro") })
+      .addEventListener("click", async () => {
+        this.proposalDrafts.delete(job.id);
+        await this.plugin.retryAskJob(job, undefined, {
+          choice: "pro",
+          routingReason: "user-regenerate-with-pro",
+          rerunOfJobId: job.id,
+        });
+        await this.refresh();
+      });
+    actions
       .createEl("button", { text: this.plugin.t("让 AI 重新合并", "Ask AI to re-merge") })
       .addEventListener("click", async () => {
         if (
@@ -380,6 +391,17 @@ export class AskInboxView extends ItemView {
       "click",
       async () => {
         await this.plugin.retryAskJob(job, questionEl.value);
+        await this.refresh();
+      }
+    );
+    actions.createEl("button", { text: this.plugin.t("使用 Pro 重试", "Retry with Pro") }).addEventListener(
+      "click",
+      async () => {
+        await this.plugin.retryAskJob(job, questionEl.value, {
+          choice: "pro",
+          routingReason: "user-regenerate-with-pro",
+          rerunOfJobId: job.id,
+        });
         await this.refresh();
       }
     );
@@ -460,6 +482,13 @@ export class AskInboxView extends ItemView {
     this.meta(card, this.plugin.t("笔记", "Note"), job.notePath);
     this.meta(card, this.plugin.t("标题路径", "Heading path"), job.headingPath.join(" > ") || "(none)");
     this.meta(card, this.plugin.t("模型", "Provider/model"), `${job.providerMode}${job.model ? ` / ${job.model}` : ""}`);
+    this.meta(
+      card,
+      this.plugin.t("模型路由", "Model routing"),
+      [job.modelRoutingMode, job.routingReason, job.rerunOfJobId ? `rerun: ${job.rerunOfJobId}` : ""]
+        .filter(Boolean)
+        .join(" / ") || "(none)"
+    );
     this.meta(card, this.plugin.t("时间", "Created/updated"), `${job.created} / ${job.updated}`);
     return card;
   }

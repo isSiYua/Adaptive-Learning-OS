@@ -9,6 +9,7 @@ import {
   proposalPreviewMarkdown,
 } from "../ask/ClarificationMergeProposal";
 import { AnthropicCompatibleProvider } from "../ai/AnthropicCompatibleProvider";
+import { resolveAskModelRoute } from "../ai/ModelRouting";
 import { OpenAICompatibleProvider } from "../ai/OpenAICompatibleProvider";
 import { createAskJobId, createClarificationItemId } from "../utils/ids";
 import { toLocalIsoString } from "../utils/dates";
@@ -18,6 +19,7 @@ import type { ClarificationStore } from "../storage/ClarificationStore";
 import type {
   AskJob,
   AskJobStatus,
+  AskModelRoutingSelection,
   ClarificationItem,
   ClarificationRecord,
   LearningOsSettings,
@@ -92,6 +94,7 @@ export class AskJobService {
     context: SelectionContext;
     question: string;
     existing?: AskJobExistingTarget;
+    modelSelection?: AskModelRoutingSelection;
   }): Promise<AskJob> {
     const settings = this.getSettings();
     const now = new Date();
@@ -125,6 +128,11 @@ export class AskJobService {
       return duplicate;
     }
     const proposedItemId = createClarificationItemId(params.question || params.context.selectedText, now);
+    const modelRoute = resolveAskModelRoute({
+      settings,
+      question: params.question,
+      selection: params.modelSelection,
+    });
     const job: AskJob = {
       schemaVersion: 1,
       id,
@@ -166,7 +174,12 @@ export class AskJobService {
       uiLanguage: settings.uiLanguage,
       providerMode: settings.providerMode,
       providerPreset: settings.providerPreset,
-      model: settings.providerModel,
+      model: modelRoute.selectedModel,
+      requestedModel: modelRoute.requestedModel,
+      selectedModel: modelRoute.selectedModel,
+      modelRoutingMode: modelRoute.modelRoutingMode,
+      routingReason: modelRoute.routingReason,
+      rerunOfJobId: modelRoute.rerunOfJobId,
       prompt,
     };
 
@@ -180,6 +193,7 @@ export class AskJobService {
     context: SelectionContext;
     question: string;
     existing?: AskJobExistingTarget;
+    modelSelection?: AskModelRoutingSelection;
   }): Promise<AskJob> {
     const job = await this.createBackgroundJob(params);
     return new Promise((resolve) => {
@@ -189,7 +203,7 @@ export class AskJobService {
     });
   }
 
-  async retry(job: AskJob, userQuestion?: string): Promise<void> {
+  async retry(job: AskJob, userQuestion?: string, modelSelection?: AskModelRoutingSelection): Promise<void> {
     const nowIso = toLocalIsoString();
     const nextQuestion = userQuestion?.trim() || job.userQuestion;
     const settings = this.getSettings();
@@ -200,11 +214,27 @@ export class AskJobService {
       language: settings.answerLanguage,
       responseStyle: "normal",
     });
+    const modelRoute = resolveAskModelRoute({
+      settings,
+      question: nextQuestion,
+      selection:
+        modelSelection ??
+        ({
+          choice: job.requestedModel ?? "auto",
+          rerunOfJobId: job.rerunOfJobId,
+        } satisfies AskModelRoutingSelection),
+    });
     await this.store.saveJob(
       {
         ...job,
         userQuestion: nextQuestion,
         prompt,
+        model: modelRoute.selectedModel,
+        requestedModel: modelRoute.requestedModel,
+        selectedModel: modelRoute.selectedModel,
+        modelRoutingMode: modelRoute.modelRoutingMode,
+        routingReason: modelRoute.routingReason,
+        rerunOfJobId: modelRoute.rerunOfJobId,
         status: "queued",
         updated: nowIso,
         rawAnswer: undefined,
@@ -229,7 +259,7 @@ export class AskJobService {
     }
 
     const settings = this.getSettings();
-    const provider = this.createApiProvider(settings);
+    const provider = this.createApiProvider(this.settingsForJob(settings, job));
     const resolvedLiveContext = liveContext === undefined ? (await this.events.resolveLiveMergeContext?.(job)) ?? null : liveContext;
     const existingRecord = resolvedLiveContext ? resolvedLiveContext.existingRecord : await this.existingRecordForJob(job);
     const proposal = await this.createMergeProposal(job, existingRecord, provider, settings);
@@ -272,7 +302,7 @@ export class AskJobService {
     }
 
     const settings = this.getSettings();
-    const provider = this.createApiProvider(settings);
+    const provider = this.createApiProvider(this.settingsForJob(settings, job));
     const prompt = buildClarificationRebasePrompt({
       job,
       latestRecord,
@@ -350,7 +380,7 @@ export class AskJobService {
         throw new Error("No API provider configured. Copy the prompt or configure a provider in settings.");
       }
 
-      const provider = this.createApiProvider(settings);
+      const provider = this.createApiProvider(this.settingsForJob(settings, current));
       const response = await provider.ask({
         userQuestion: current.userQuestion,
         selectedText: current.selectedText,
@@ -491,6 +521,13 @@ export class AskJobService {
     const next = await this.store.updateStatus(job, status, toLocalIsoString(), type);
     this.events.onChanged?.();
     return next;
+  }
+
+  private settingsForJob(settings: LearningOsSettings, job: AskJob): LearningOsSettings {
+    return {
+      ...settings,
+      providerModel: job.selectedModel ?? job.model ?? settings.providerModel,
+    };
   }
 
   private createApiProvider(settings: LearningOsSettings): ApiProvider {

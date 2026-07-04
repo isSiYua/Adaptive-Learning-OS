@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { buildClarificationBlock } from "../src/ask/ClarificationBlock.ts";
 import { generatedContentMissingWarning } from "../src/ask/AskIntent.ts";
+import { resolveAskModelRoute, shouldSuggestProForQuestion } from "../src/ai/ModelRouting.ts";
 import {
   buildGeneratedContentBlock,
   buildClarificationMergePrompt,
@@ -65,6 +66,9 @@ import { stableHash as stableHashForTest } from "../src/utils/hash.ts";
 const settings = {
   uiLanguage: "zh",
   answerLanguage: "auto",
+  defaultAskModel: "deepseek-v4-flash",
+  deepAskModel: "deepseek-v4-pro",
+  modelRoutingMode: "suggest",
 };
 
 const job = {
@@ -193,6 +197,126 @@ test("AskJobService does not enqueue duplicate applied question", async () => {
   assert.equal(created.id, "job-existing-applied");
   assert.equal(jobs.length, 1);
   assert.equal(jobs[0].status, "applied");
+});
+
+test("model routing defaults normal Auto asks to Flash and suggests Pro without auto-upgrade", () => {
+  const normal = resolveAskModelRoute({
+    settings,
+    question: "梯度是啥？",
+    selection: { choice: "auto" },
+  });
+  const complex = resolveAskModelRoute({
+    settings,
+    question: "帮我严格检查这个插件架构和数据一致性 bug",
+    selection: { choice: "auto" },
+  });
+  const declined = resolveAskModelRoute({
+    settings,
+    question: "帮我严格检查这个插件架构和数据一致性 bug",
+    selection: { choice: "auto", suggestedProDecision: "declined" },
+  });
+  const accepted = resolveAskModelRoute({
+    settings,
+    question: "帮我严格检查这个插件架构和数据一致性 bug",
+    selection: { choice: "auto", suggestedProDecision: "accepted" },
+  });
+  const proRerun = resolveAskModelRoute({
+    settings,
+    question: "梯度是啥？",
+    selection: {
+      choice: "pro",
+      routingReason: "user-regenerate-with-pro",
+      rerunOfJobId: "job-original",
+    },
+  });
+
+  assert.equal(shouldSuggestProForQuestion("帮我严格检查这个插件架构和数据一致性 bug"), true);
+  assert.equal(normal.selectedModel, "deepseek-v4-flash");
+  assert.equal(normal.routingReason, "default-flash-for-normal-ask");
+  assert.equal(complex.selectedModel, "deepseek-v4-flash");
+  assert.equal(complex.routingReason, "suggest-pro-available-default-flash");
+  assert.equal(declined.selectedModel, "deepseek-v4-flash");
+  assert.equal(declined.routingReason, "suggested-pro-but-user-chose-flash");
+  assert.equal(accepted.selectedModel, "deepseek-v4-pro");
+  assert.equal(accepted.routingReason, "suggested-pro-user-confirmed");
+  assert.equal(proRerun.selectedModel, "deepseek-v4-pro");
+  assert.equal(proRerun.modelRoutingMode, "manual");
+  assert.equal(proRerun.routingReason, "user-regenerate-with-pro");
+  assert.equal(proRerun.rerunOfJobId, "job-original");
+});
+
+test("AskJobService records selected model routing metadata", async () => {
+  const fileStore = new MemoryFileStore();
+  const store = new AskJobStore(fileStore, ".learning-os");
+  const service = new AskJobService(
+    store,
+    { recordPathForId: (id) => `.learning-os/clarifications/${id}.json` },
+    () => ({
+      ...settings,
+      schemaVersion: 1,
+      providerMode: "manual",
+      providerPreset: "deepseek",
+      providerModel: "legacy-model",
+      maxConcurrentAskJobs: 2,
+    })
+  );
+  const created = await service.createBackgroundJob({
+    question: "梯度是啥？",
+    modelSelection: { choice: "auto" },
+    context: {
+      notePath: job.notePath,
+      noteTitle: "LOOCV",
+      selectedText: job.selectedText,
+      headingPath: job.headingPath,
+      currentHeading: "LOOCV",
+      parentHeading: "Resampling",
+      nearbyBefore: "",
+      nearbyAfter: "",
+      frontmatter: {},
+      detectedConceptIds: [job.detectedConcept],
+      sourceBlock: job.sourceBlock,
+      sourceBlockHash: job.sourceBlockHash,
+      sourceStartOffset: job.sourceStartOffset,
+      sourceEndOffset: job.sourceEndOffset,
+      answerLanguage: "auto",
+      sourceSentenceTruncated: false,
+      originalSelectionLength: job.selectedText.length,
+    },
+  });
+
+  assert.equal(created.model, "deepseek-v4-flash");
+  assert.equal(created.selectedModel, "deepseek-v4-flash");
+  assert.equal(created.requestedModel, "auto");
+  assert.equal(created.modelRoutingMode, "suggest");
+  assert.equal(created.routingReason, "default-flash-for-normal-ask");
+
+  const proCreated = await service.createBackgroundJob({
+    question: "帮我严格检查这个插件架构和数据一致性 bug",
+    modelSelection: { choice: "pro" },
+    context: {
+      notePath: "Stats/Deep.md",
+      noteTitle: "Deep",
+      selectedText: "architecture",
+      headingPath: ["Deep"],
+      currentHeading: "Deep",
+      parentHeading: null,
+      nearbyBefore: "",
+      nearbyAfter: "",
+      frontmatter: {},
+      detectedConceptIds: ["architecture"],
+      sourceBlock: "architecture",
+      sourceBlockHash: "hash-architecture",
+      answerLanguage: "auto",
+      sourceSentenceTruncated: false,
+      originalSelectionLength: "architecture".length,
+    },
+  });
+
+  assert.equal(proCreated.model, "deepseek-v4-pro");
+  assert.equal(proCreated.selectedModel, "deepseek-v4-pro");
+  assert.equal(proCreated.requestedModel, "pro");
+  assert.equal(proCreated.modelRoutingMode, "manual");
+  assert.equal(proCreated.routingReason, "user-selected-pro");
 });
 
 test("source navigation finds item anchors with flexible html comment spacing", () => {

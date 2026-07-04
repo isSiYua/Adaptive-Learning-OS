@@ -24,6 +24,9 @@ export const DEFAULT_SETTINGS: LearningOsSettings = {
   providerChatCompletionsPath: "/v1/chat/completions",
   providerMessagesPath: "/v1/messages",
   providerModel: "gpt-4.1-mini",
+  defaultAskModel: "deepseek-v4-flash",
+  deepAskModel: "deepseek-v4-pro",
+  modelRoutingMode: "suggest",
   providerApiKey: "",
   providerTemperature: 0.2,
   providerMaxTokens: 1200,
@@ -229,6 +232,41 @@ export class LearningOsSettingTab extends PluginSettingTab {
           this.plugin.settings.providerModel = value.trim();
           await this.plugin.saveSettings();
         })
+      );
+
+    new Setting(containerEl)
+      .setName(this.plugin.t("默认 Ask 模型", "Default Ask model"))
+      .setDesc(this.plugin.t("Auto / Flash 默认使用的低成本模型。", "Low-cost model used by Auto / Flash."))
+      .addText((text) =>
+        text.setValue(this.plugin.settings.defaultAskModel).onChange(async (value) => {
+          this.plugin.settings.defaultAskModel = value.trim() || "deepseek-v4-flash";
+          await this.plugin.saveSettings();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName(this.plugin.t("Deep 模型", "Deep model"))
+      .setDesc(this.plugin.t("Pro 路由和 Inbox Pro 重生成使用的模型。", "Model used for Pro routing and Inbox Pro regeneration."))
+      .addText((text) =>
+        text.setValue(this.plugin.settings.deepAskModel).onChange(async (value) => {
+          this.plugin.settings.deepAskModel = value.trim() || "deepseek-v4-pro";
+          await this.plugin.saveSettings();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName(this.plugin.t("模型路由模式", "Model routing mode"))
+      .setDesc(this.plugin.t("当前不会静默自动升级到 Pro。", "The plugin will not silently upgrade to Pro."))
+      .addDropdown((dropdown) =>
+        dropdown
+          .addOption("manual", this.plugin.t("Manual only", "Manual only"))
+          .addOption("suggest", this.plugin.t("Suggest Pro", "Suggest Pro"))
+          .addOption("auto", this.plugin.t("Auto route with budget cap（未来）", "Auto route with budget cap (future)"))
+          .setValue(this.plugin.settings.modelRoutingMode)
+          .onChange(async (value) => {
+            this.plugin.settings.modelRoutingMode = value as LearningOsSettings["modelRoutingMode"];
+            await this.plugin.saveSettings();
+          })
       );
 
     new Setting(containerEl)

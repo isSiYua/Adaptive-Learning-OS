@@ -1,11 +1,12 @@
 import { Modal, Notice } from "obsidian";
 import { ManualClipboardProvider } from "../ai/ManualClipboardProvider";
+import { shouldSuggestProForQuestion } from "../ai/ModelRouting";
 import type { App } from "obsidian";
-import type { LearningOsSettings, SelectionContext } from "../types";
+import type { AskModelRoutingSelection, LearningOsSettings, SelectionContext } from "../types";
 
 interface AskModalCallbacks {
-  askInBackground: (question: string) => Promise<void>;
-  askAndWait: (question: string) => Promise<void>;
+  askInBackground: (question: string, modelSelection?: AskModelRoutingSelection) => Promise<void>;
+  askAndWait: (question: string, modelSelection?: AskModelRoutingSelection) => Promise<void>;
   openInbox: () => Promise<void>;
 }
 
@@ -15,6 +16,7 @@ interface AskModalExistingState {
 
 export class AskModal extends Modal {
   private questionEl!: HTMLTextAreaElement;
+  private modelEl!: HTMLSelectElement;
   private promptEl!: HTMLTextAreaElement;
   private manualProvider = new ManualClipboardProvider();
 
@@ -46,6 +48,7 @@ export class AskModal extends Modal {
     );
 
     this.questionEl = this.addTextarea(this.t("你的问题", "Your question"), "");
+    this.addModelChoice();
 
     const actions = contentEl.createDiv({ cls: "learning-os-actions" });
     actions
@@ -92,7 +95,7 @@ export class AskModal extends Modal {
       return;
     }
 
-    await this.callbacks.askInBackground(question);
+    await this.callbacks.askInBackground(question, this.resolveModelSelection(question));
     new Notice(
       this.t(
         "已提交后台提问，完成后会出现在 Learning OS 收件箱。",
@@ -110,7 +113,7 @@ export class AskModal extends Modal {
       return;
     }
 
-    await this.callbacks.askAndWait(question);
+    await this.callbacks.askAndWait(question, this.resolveModelSelection(question));
     await this.callbacks.openInbox();
     this.close();
   }
@@ -125,6 +128,38 @@ export class AskModal extends Modal {
     });
     this.promptEl.value = prompt;
     return prompt;
+  }
+
+  private addModelChoice(): void {
+    const field = this.contentEl.createDiv({ cls: "learning-os-field" });
+    field.createEl("label", { text: this.t("模型", "Model") });
+    this.modelEl = field.createEl("select");
+    this.modelEl.createEl("option", { value: "auto", text: "Auto" });
+    this.modelEl.createEl("option", { value: "flash", text: "Flash" });
+    this.modelEl.createEl("option", { value: "pro", text: "Pro" });
+    this.modelEl.value = "auto";
+    field.createDiv({
+      cls: "learning-os-readonly",
+      text: this.t(
+        `Auto 默认使用 ${this.settings.defaultAskModel || "deepseek-v4-flash"}；复杂任务会建议 Pro。`,
+        `Auto uses ${this.settings.defaultAskModel || "deepseek-v4-flash"} by default; complex tasks may suggest Pro.`
+      ),
+    });
+  }
+
+  private resolveModelSelection(question: string): AskModelRoutingSelection {
+    const choice = (this.modelEl?.value ?? "auto") as AskModelRoutingSelection["choice"];
+    if (choice !== "auto") return { choice };
+    if (this.settings.modelRoutingMode === "suggest" && shouldSuggestProForQuestion(question)) {
+      const usePro = confirm(
+        this.t(
+          "这个问题可能更适合 Pro，因为它涉及代码/架构/复杂推理。选择 OK 使用 Pro，选择 Cancel 使用 Flash。",
+          "This question may fit Pro because it involves code, architecture, or complex reasoning. Choose OK for Pro, Cancel for Flash."
+        )
+      );
+      return { choice: "auto", suggestedProDecision: usePro ? "accepted" : "declined" };
+    }
+    return { choice };
   }
 
   private async copyPrompt(): Promise<void> {

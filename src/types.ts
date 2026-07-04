@@ -8,6 +8,14 @@ export type FollowUpUpdateMode = "ai-merge" | "append" | "replace";
 export type UiLanguage = "zh" | "en";
 export type AnswerLanguage = "auto" | "zh" | "en";
 export type AskSourceMode = "normal-note" | "clarification-item" | "generated-content-item";
+export type AskModelChoice = "auto" | "flash" | "pro";
+export type ModelRoutingMode = "manual" | "suggest" | "auto";
+export interface AskModelRoutingSelection {
+  choice: AskModelChoice;
+  suggestedProDecision?: "accepted" | "declined";
+  routingReason?: string;
+  rerunOfJobId?: string;
+}
 export type AskJobStatus =
   | "queued"
   | "running"
@@ -38,6 +46,9 @@ export interface LearningOsSettings {
   providerChatCompletionsPath: string;
   providerMessagesPath: string;
   providerModel: string;
+  defaultAskModel: string;
+  deepAskModel: string;
+  modelRoutingMode: ModelRoutingMode;
   providerApiKey: string;
   providerTemperature: number;
   providerMaxTokens: number;
@@ -194,6 +205,11 @@ export interface AskJob {
   providerMode: string;
   providerPreset?: string;
   model?: string;
+  requestedModel?: AskModelChoice;
+  selectedModel?: string;
+  modelRoutingMode?: ModelRoutingMode;
+  routingReason?: string;
+  rerunOfJobId?: string;
   prompt: string;
   rawAnswer?: string;
   reviewWarning?: string;

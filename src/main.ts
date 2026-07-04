@@ -33,7 +33,7 @@ import { FileStore } from "./storage/FileStore";
 import { timestampSlug } from "./utils/dates";
 import { ASK_INBOX_VIEW_TYPE, AskInboxView } from "./views/AskInboxView";
 import type { Editor, Menu } from "obsidian";
-import type { AskJob, LearningOsSettings, ProviderPreset, SelectionContext } from "./types";
+import type { AskJob, AskModelRoutingSelection, LearningOsSettings, ProviderPreset, SelectionContext } from "./types";
 import type { OrphanCleanupPlan } from "./cleanup/OrphanCleanup";
 import type { ApplyAskJobProposalResult } from "./jobs/ApplyAskJobProposal";
 
@@ -163,7 +163,9 @@ export default class AdaptiveLearningOsPlugin extends Plugin {
       this.settings.providerMode = "openai-compatible";
       this.settings.providerBaseUrl = "https://api.deepseek.com";
       this.settings.providerChatCompletionsPath = "/chat/completions";
-      this.settings.providerModel = "deepseek-chat";
+      this.settings.defaultAskModel = this.settings.defaultAskModel || "deepseek-v4-flash";
+      this.settings.deepAskModel = this.settings.deepAskModel || "deepseek-v4-pro";
+      this.settings.providerModel = this.settings.defaultAskModel;
     }
     if (preset === "glm-zhipu") {
       this.settings.providerMode = "openai-compatible";
@@ -326,18 +328,20 @@ export default class AdaptiveLearningOsPlugin extends Plugin {
       : undefined;
 
     new AskModal(this.app, context, this.settings, {
-      askInBackground: async (question: string) => {
+      askInBackground: async (question: string, modelSelection?: AskModelRoutingSelection) => {
         await this.askJobService.createBackgroundJob({
           context,
           question,
           existing: existingTarget,
+          modelSelection,
         });
       },
-      askAndWait: async (question: string) => {
+      askAndWait: async (question: string, modelSelection?: AskModelRoutingSelection) => {
         const job = await this.askJobService.createJobAndWait({
           context,
           question,
           existing: existingTarget,
+          modelSelection,
         });
         if (job.status === "failed") {
           new Notice(job.error?.message ?? "AI request failed.");
@@ -437,8 +441,8 @@ export default class AdaptiveLearningOsPlugin extends Plugin {
     return this.askJobStore.listJobs();
   }
 
-  async retryAskJob(job: AskJob, userQuestion?: string): Promise<void> {
-    await this.askJobService.retry(job, userQuestion);
+  async retryAskJob(job: AskJob, userQuestion?: string, modelSelection?: AskModelRoutingSelection): Promise<void> {
+    await this.askJobService.retry(job, userQuestion, modelSelection);
   }
 
   async remergeAskJob(job: AskJob): Promise<void> {
