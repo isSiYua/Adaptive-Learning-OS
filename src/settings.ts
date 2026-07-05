@@ -32,6 +32,9 @@ export const DEFAULT_SETTINGS: LearningOsSettings = {
   providerMaxTokens: 1200,
   previewPromptBeforeSend: true,
   maxConcurrentAskJobs: 2,
+  enableKnowledgeData: true,
+  autoSyncKnowledgeDataAfterApply: true,
+  trackKnowledgeDataManualEdits: true,
 };
 
 export class LearningOsSettingTab extends PluginSettingTab {
@@ -87,6 +90,36 @@ export class LearningOsSettingTab extends PluginSettingTab {
             this.plugin.settings.dataFolder = value.trim() || DEFAULT_DATA_FOLDER;
             await this.plugin.saveSettings();
           })
+      );
+
+    new Setting(containerEl)
+      .setName("Enable KnowledgeData")
+      .setDesc("Maintain the local SQLite KnowledgeData index under the Learning OS data folder.")
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.enableKnowledgeData).onChange(async (value) => {
+          this.plugin.settings.enableKnowledgeData = value;
+          await this.plugin.saveSettings();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Auto sync KnowledgeData after Apply")
+      .setDesc("After a proposal is safely applied and verified, index the committed live marker into KnowledgeData.")
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.autoSyncKnowledgeDataAfterApply).onChange(async (value) => {
+          this.plugin.settings.autoSyncKnowledgeDataAfterApply = value;
+          await this.plugin.saveSettings();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Track manual edits/deletions in Learning OS items")
+      .setDesc("When an edited Markdown note still contains Learning OS markers, record local hash changes and missing item markers.")
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.trackKnowledgeDataManualEdits).onChange(async (value) => {
+          this.plugin.settings.trackKnowledgeDataManualEdits = value;
+          await this.plugin.saveSettings();
+        })
       );
 
     new Setting(containerEl)

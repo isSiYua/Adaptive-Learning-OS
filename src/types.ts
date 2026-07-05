@@ -54,6 +54,9 @@ export interface LearningOsSettings {
   providerMaxTokens: number;
   previewPromptBeforeSend: boolean;
   maxConcurrentAskJobs: number;
+  enableKnowledgeData: boolean;
+  autoSyncKnowledgeDataAfterApply: boolean;
+  trackKnowledgeDataManualEdits: boolean;
 }
 
 export interface SelectionContext {

@@ -27,6 +27,15 @@ import {
 import { liveAwareProposalForState, sourceDeletedApplyPolicy } from "./jobs/LiveAwareMerge";
 import { generatedContentMissingWarning } from "./ask/AskIntent";
 import { DEFAULT_SETTINGS, LearningOsSettingTab } from "./settings";
+import {
+  backupKnowledgeData,
+  exportKnowledgeDataSummary,
+  initializeKnowledgeData,
+  rebuildKnowledgeDataIndex,
+  showKnowledgeDataSummary,
+} from "./knowledge/KnowledgeCommands";
+import { KnowledgeDb, saveKnowledgeDb } from "./knowledge/KnowledgeDb";
+import { KnowledgeNoteSyncDebouncer, noteHasFinalLearningOsMarkers, syncKnowledgeDataForNote } from "./knowledge/KnowledgeSync";
 import { AskJobStore } from "./storage/AskJobStore";
 import { ClarificationStore } from "./storage/ClarificationStore";
 import { FileStore } from "./storage/FileStore";
@@ -44,6 +53,8 @@ export default class AdaptiveLearningOsPlugin extends Plugin {
   private askJobStore!: AskJobStore;
   private askJobService!: AskJobService;
   private floatingAskButton: HTMLButtonElement | null = null;
+  private knowledgeSyncDebouncer = new KnowledgeNoteSyncDebouncer();
+  private knowledgeSyncQueue: Promise<void> = Promise.resolve();
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -61,6 +72,46 @@ export default class AdaptiveLearningOsPlugin extends Plugin {
       callback: async () => {
         await this.fileStore.ensureDataFolders();
         new Notice(`Learning OS folders ready in ${this.settings.dataFolder}.`);
+      },
+    });
+
+    this.addCommand({
+      id: "initialize-knowledge-data",
+      name: "Learning OS: Initialize KnowledgeData",
+      callback: () => {
+        void initializeKnowledgeData(this.knowledgeCommandContext());
+      },
+    });
+
+    this.addCommand({
+      id: "rebuild-knowledge-data-index",
+      name: "Learning OS: Rebuild KnowledgeData Index",
+      callback: () => {
+        void rebuildKnowledgeDataIndex(this.knowledgeCommandContext());
+      },
+    });
+
+    this.addCommand({
+      id: "export-knowledge-data-summary",
+      name: "Learning OS: Export KnowledgeData Summary",
+      callback: () => {
+        void exportKnowledgeDataSummary(this.knowledgeCommandContext());
+      },
+    });
+
+    this.addCommand({
+      id: "show-knowledge-data-summary",
+      name: "Learning OS: Show KnowledgeData Global Summary",
+      callback: () => {
+        void showKnowledgeDataSummary(this.knowledgeCommandContext());
+      },
+    });
+
+    this.addCommand({
+      id: "backup-knowledge-data",
+      name: "Learning OS: Backup KnowledgeData",
+      callback: () => {
+        void backupKnowledgeData(this.knowledgeCommandContext());
       },
     });
 
@@ -135,11 +186,23 @@ export default class AdaptiveLearningOsPlugin extends Plugin {
     );
     this.registerSelectionAskButton();
 
+    this.registerEvent(
+      this.app.vault.on("modify", (file) => {
+        if (file instanceof TFile) {
+          this.queueKnowledgeDataNoteSync(file);
+        }
+      })
+    );
+
     await this.askJobService.initialize();
+    if (this.settings.enableKnowledgeData) {
+      void this.ensureKnowledgeDataInitialized();
+    }
   }
 
   onunload(): void {
     this.hideFloatingAskButton();
+    this.knowledgeSyncDebouncer.clearAll();
   }
 
   async loadSettings(): Promise<void> {
@@ -210,6 +273,84 @@ export default class AdaptiveLearningOsPlugin extends Plugin {
         resolveLiveMergeContext: (job) => this.resolveLiveMergeContext(job),
       }
     );
+  }
+
+  private knowledgeCommandContext() {
+    return {
+      app: this.app,
+      fileStore: this.fileStore,
+      dataFolder: this.settings.dataFolder,
+      listAskJobs: () => this.askJobStore.listJobs(),
+    };
+  }
+
+  private async ensureKnowledgeDataInitialized(): Promise<void> {
+    try {
+      const db = await KnowledgeDb.fromFileStore(this.fileStore, this.settings.dataFolder);
+      await saveKnowledgeDb(this.fileStore, this.settings.dataFolder, db);
+      db.close();
+    } catch (error) {
+      console.warn("Learning OS KnowledgeData auto-initialize failed.", error);
+    }
+  }
+
+  private async syncKnowledgeDataAfterApply(
+    job: AskJob,
+    result: ApplyAskJobProposalResult
+  ): Promise<void> {
+    if (!this.settings.enableKnowledgeData || !this.settings.autoSyncKnowledgeDataAfterApply) return;
+    try {
+      const db = await KnowledgeDb.fromFileStore(this.fileStore, this.settings.dataFolder);
+      syncKnowledgeDataForNote(db, {
+        notePath: job.notePath,
+        markdown: result.markdown,
+        mode: "apply",
+        askJobs: [{ ...job, appliedItemIds: result.verification.appliedItemIds }],
+        appliedItemIds: result.verification.appliedItemIds,
+        trackManualEdits: this.settings.trackKnowledgeDataManualEdits,
+        markMissing: true,
+      });
+      await saveKnowledgeDb(this.fileStore, this.settings.dataFolder, db);
+      db.close();
+    } catch (error) {
+      console.warn("Learning OS KnowledgeData auto-sync after Apply failed.", error);
+      new Notice("Learning OS applied successfully, but KnowledgeData auto-sync failed. Manual rebuild is still available.");
+    }
+  }
+
+  private queueKnowledgeDataNoteSync(file: TFile): void {
+    if (!this.settings.enableKnowledgeData || !this.settings.trackKnowledgeDataManualEdits) return;
+    if (file.extension !== "md") return;
+
+    this.knowledgeSyncDebouncer.queue(file.path, () => {
+      this.enqueueKnowledgeDataSyncTask(async () => {
+        await this.syncKnowledgeDataForModifiedNote(file);
+      });
+    });
+  }
+
+  private enqueueKnowledgeDataSyncTask(task: () => Promise<void>): void {
+    this.knowledgeSyncQueue = this.knowledgeSyncQueue
+      .then(task)
+      .catch((error) => {
+        console.warn("Learning OS KnowledgeData background sync failed.", error);
+      });
+  }
+
+  private async syncKnowledgeDataForModifiedNote(file: TFile): Promise<void> {
+    const markdown = await this.app.vault.read(file);
+    if (!noteHasFinalLearningOsMarkers(markdown)) return;
+
+    const db = await KnowledgeDb.fromFileStore(this.fileStore, this.settings.dataFolder);
+    syncKnowledgeDataForNote(db, {
+      notePath: file.path,
+      markdown,
+      mode: "note-modify",
+      trackManualEdits: true,
+      markMissing: true,
+    });
+    await saveKnowledgeDb(this.fileStore, this.settings.dataFolder, db);
+    db.close();
   }
 
   private async openAskModal(editor: Editor, view: MarkdownView): Promise<void> {
@@ -507,6 +648,7 @@ export default class AdaptiveLearningOsPlugin extends Plugin {
       job,
       editedVisibleMarkdown,
     });
+    await this.syncKnowledgeDataAfterApply(job, result);
     await this.refreshAskInboxViews();
     return result;
   }

@@ -16,6 +16,13 @@ export class FileStore {
     await this.ensureFolder(`${this.dataFolder}/logs`);
     await this.ensureFolder(`${this.dataFolder}/generated`);
     await this.ensureFolder(`${this.dataFolder}/generated/ask-prompts`);
+    await this.ensureKnowledgeFolders();
+  }
+
+  async ensureKnowledgeFolders(): Promise<void> {
+    await this.ensureFolder(`${this.dataFolder}/knowledge`);
+    await this.ensureFolder(`${this.dataFolder}/knowledge/exports`);
+    await this.ensureFolder(`${this.dataFolder}/knowledge/backups`);
   }
 
   async exists(path: string): Promise<boolean> {
@@ -32,6 +39,24 @@ export class FileStore {
     await this.ensureDataFolders();
     await this.ensureParentFolder(path);
     await this.app.vault.adapter.write(path, content);
+  }
+
+  async readBinary(path: string): Promise<ArrayBuffer | null> {
+    const adapter = this.app.vault.adapter;
+    if (!(await adapter.exists(path))) return null;
+    return adapter.readBinary(path);
+  }
+
+  async writeBinary(path: string, content: ArrayBuffer): Promise<void> {
+    await this.ensureDataFolders();
+    await this.ensureParentFolder(path);
+    await this.app.vault.adapter.writeBinary(path, content);
+  }
+
+  async copyFile(fromPath: string, toPath: string): Promise<void> {
+    const content = await this.readBinary(fromPath);
+    if (!content) return;
+    await this.writeBinary(toPath, content);
   }
 
   async readJson<T>(path: string): Promise<T | null> {

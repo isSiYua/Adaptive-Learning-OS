@@ -82,6 +82,77 @@ Reserved for local Learning OS configuration or profile files.
 
 Reserved for generated prompts, patches, proposals, or other derived artifacts.
 
+## `.learning-os/knowledge/`
+
+SQLite-backed long-term KnowledgeData storage added in Phase 2.1.
+
+Expected layout:
+
+```text
+.learning-os/knowledge/
+├── knowledge.sqlite
+├── exports/
+│   ├── concepts.json
+│   ├── knowledge_summary.json
+│   └── mastery_summary.md
+└── backups/
+    └── knowledge-YYYYMMDD-HHMMSS.sqlite
+```
+
+KnowledgeData is separate from Ask job history.
+
+Ask job JSON answers:
+
+```text
+What happened in a specific Ask interaction?
+```
+
+KnowledgeData answers:
+
+```text
+What concepts/items/evidence/source references currently describe the learner's knowledge state?
+```
+
+The SQLite database currently contains:
+
+- `meta`
+- `concepts`
+- `concept_edges`
+- `items`
+- `evidence`
+- `source_refs`
+- `reviews`
+
+The `reviews` table is future-ready only. The Review Scheduler is not implemented.
+
+KnowledgeData commands:
+
+- `Learning OS: Initialize KnowledgeData`
+- `Learning OS: Rebuild KnowledgeData Index`
+- `Learning OS: Export KnowledgeData Summary`
+- `Learning OS: Show KnowledgeData Global Summary`
+- `Learning OS: Backup KnowledgeData`
+
+The rebuild command is explicit and non-destructive. It scans live Markdown notes for Learning OS item markers, indexes compact item/concept/evidence/source-ref records, and writes to `knowledge.sqlite`. It does not modify note content, call AI, or scan arbitrary vault prose semantically.
+
+Phase 2.1.1 added automatic KnowledgeData sync:
+
+- auto-initialize on plugin load when KnowledgeData is enabled,
+- auto sync after successful verified Apply,
+- debounced note-level sync for modified Markdown notes that contain final Learning OS markers,
+- content hash changes recorded as `manual_edit` evidence,
+- missing known markers in the same note recorded as missing/deletion evidence.
+
+Automatic sync is still local and marker-based. It does not run AI, scan the full vault in the background, or index draft-only `learnos-draft-*` markers.
+
+The global summary command reports whole-vault/project KnowledgeData, not only the current note. Its item counts are split as:
+
+- total indexed items: all `items` rows,
+- active items: `status = 'active'`,
+- missing/deleted items: `status in ('missing', 'deleted', 'orphan')`.
+
+A current-note KnowledgeData summary command is a future enhancement, not part of Phase 2.1.1.
+
 ## Cleanup Terms
 
 An orphan clarification record means a clarification JSON file exists, but no note contains its `learnos-clarification-id` marker.
