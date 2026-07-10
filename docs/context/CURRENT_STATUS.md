@@ -1,13 +1,13 @@
 # Adaptive Learning OS - Current Status
 
-Version: 2026-07-05 after Phase 2.1.1  
+Version: 2026-07-10 after Phase 2.1.2B finalization
 Purpose: quick but detailed status file for new ChatGPT/Codex conversations.
 
 ---
 
 # 1. Executive Summary
 
-Adaptive Learning OS is currently an Obsidian plugin with a mature Ask / Inbox / Apply workflow and a local-first KnowledgeData foundation that now syncs automatically during normal plugin usage.
+Adaptive Learning OS is currently an Obsidian plugin with a mature Ask / Inbox / Apply workflow, a local-first KnowledgeData foundation that syncs automatically during normal plugin usage, and a finalized Phase 2.1.2B inline draft staging baseline.
 
 The project is no longer just a selected-text Ask demo.
 
@@ -18,7 +18,7 @@ Phase 1 Ask core: implemented
 Phase 1.5 model routing: implemented
 Phase 2.1 KnowledgeData foundation: implemented
 Phase 2.1.1 Automatic KnowledgeData Sync: implemented
-Phase 2.1.2 Inline Draft Item Staging: parser/design/test skeleton only; user-facing workflow not implemented
+Phase 2.1.2B Natural Inline Draft Staging: finalized, default off, baseline frozen
 Review Scheduler: not implemented
 Note Check AI scan: not implemented
 Learning Project Pipeline: not implemented
@@ -27,14 +27,13 @@ Vector DB: not implemented
 Web app/cloud sync: not implemented
 ```
 
-The highest-value next development direction is likely one of:
+The next development direction is not started. The only current candidate is:
 
 ```text
-Phase 2.1.2 - Full Inline Draft Item Staging, if the user wants in-note proposal editing
-Phase 2.2 - Knowledge hierarchy, richer indexing, and context pack generation
+KnowledgeData Foundation / Knowledge hierarchy and context pack planning
 ```
 
-but the next phase should receive its own brief before Codex starts coding.
+It must receive its own brief before Codex starts coding.
 
 ---
 
@@ -139,6 +138,45 @@ Apply is live-note-aware:
 - preserve unrelated live items,
 - verify expected markers after write,
 - fail instead of fake-applying when markers are missing.
+
+## 2.6.1 Experimental Inline Draft Staging
+
+Phase 2.1.2B added a default-off setting:
+
+```text
+Experimental inline draft staging
+```
+
+When enabled, a completed Ask job can create a local draft callout in the note. The draft is meant for human editing before Apply.
+
+Draft marker family:
+
+```markdown
+> <!-- learnos-draft-id: draft-... -->
+> <!-- learnos-draft-job-id: job-... -->
+> <!-- learnos-draft-kind: clarification | generated-content -->
+> <!-- learnos-draft-operation: add-item | add-sibling-item | update-item -->
+> <!-- learnos-draft-target-container-id: clar-... | gen-... -->
+> <!-- learnos-draft-target-item-id: item-... -->
+> <!-- learnos-draft-target-item-hash: ... -->
+> <!-- learnos-draft-source-block-hash: ... -->
+> <!-- learnos-draft-created-at: ... -->
+> <!-- learnos-draft-item-id: draft-item-... -->
+```
+
+Important rules:
+
+- drafts do not contain final `learnos-item-id` markers,
+- KnowledgeData ignores draft-only markers,
+- Apply reads the live draft from the note if it exists,
+- user edits inside the draft are preserved and committed on Apply,
+- deleting a draft means Apply becomes a no-op for that draft job,
+- missing target final blocks fail clearly and preserve the draft,
+- normal-note Ask can stage near the selected source,
+- Ask inside a `tip` clarification block stages under that block and Apply merges back into that same block,
+- Ask inside a generated-content `note` block stages under that block and Apply merges back into that same generated block.
+
+Phase 2.1.2B intentionally implements add-item/add-sibling staging only. It does not implement whole-block rewrite, multi-item rewrite, existing-item update inline drafts, Review, Note Check, or Context Pack Builder.
 
 ## 2.7 Cleanup
 
@@ -358,6 +396,8 @@ Important files:
 - `src/ask/AiResponseParser.ts`
 - `src/ask/ClarificationBlock.ts`
 - `src/ask/ClarificationMergeProposal.ts`
+- `src/ask/InlineDraftBlock.ts`
+- `src/ask/InlineDraftStaging.ts`
 - `src/jobs/AskJobService.ts`
 - `src/jobs/ApplyAskJobProposal.ts`
 - `src/jobs/LiveAwareMerge.ts`
@@ -391,7 +431,7 @@ tests/*.test.mjs
 Current full test run:
 
 ```text
-133 tests passing
+196 tests passing
 ```
 
 ## 4.4 Docs
@@ -412,7 +452,6 @@ The latest successful direct verification used the bundled Node runtime:
 ```text
 node ./node_modules/typescript/bin/tsc -noEmit -skipLibCheck
 node --loader ./tests/ts-extension-loader.mjs --test tests/*.test.mjs
-node ./node_modules/typescript/bin/tsc -noEmit -skipLibCheck
 node esbuild.config.mjs production
 ```
 
@@ -420,8 +459,10 @@ Results:
 
 ```text
 TypeScript: passed
-Tests: 133 passed
+Focused tests: 178 passed
+Full tests: 196 passed
 Production build: passed
+Build hash: 62d69a8f367a36481c97bc3888f9ff73211157f7662d660852b163345af93b4a
 ```
 
 Note:
@@ -444,6 +485,8 @@ KnowledgeData limitations:
 Ask limitations:
 
 - Provider quality depends on configured external model.
+- Inline draft staging is experimental and default off, but the Phase 2.1.2B Ask / Inbox / Draft / Apply baseline is finalized and frozen.
+- Inline draft staging supports natural add-item/add-sibling flows, not existing item rewrite or multi-item rewrite.
 - Manual Obsidian QA should still be done after major releases.
 - Full import/export migration UX is not yet mature.
 
@@ -460,10 +503,10 @@ Project limitations:
 
 # 7. Recommended Next Phase
 
-A good next phase could be:
+A good next candidate could be:
 
 ```text
-Phase 2.2 - Knowledge hierarchy and context pack generation
+KnowledgeData Foundation / Knowledge hierarchy and context pack planning
 ```
 
 Possible goals:

@@ -5,9 +5,12 @@ import { OrphanCleanupModal } from "./cleanup/OrphanCleanupModal";
 import {
   buildClarificationBlock,
   findClarificationForSourceBlock,
-  findClarificationNearSelection,
   parseLiveClarificationItemsFromBlock,
 } from "./ask/ClarificationBlock";
+import {
+  findLearningOsContainerAtSelection,
+  learningOsItemContextFromBlock,
+} from "./ask/LearningOsSourceMapping";
 import { convertLegacyAskCards } from "./ask/LegacyAskCardConverter";
 import { parseAskCards } from "./ask/AskCardParser";
 import { positionToOffset } from "./editor/MarkdownOffsets";
@@ -26,6 +29,11 @@ import {
 } from "./jobs/LiveClarificationState";
 import { liveAwareProposalForState, sourceDeletedApplyPolicy } from "./jobs/LiveAwareMerge";
 import { generatedContentMissingWarning } from "./ask/AskIntent";
+import {
+  prepareInlineDraftApply,
+  stageInlineDraftForJob,
+  withInlineDraftStatus,
+} from "./ask/InlineDraftStaging";
 import { DEFAULT_SETTINGS, LearningOsSettingTab } from "./settings";
 import {
   backupKnowledgeData,
@@ -264,8 +272,9 @@ export default class AdaptiveLearningOsPlugin extends Plugin {
       () => this.settings,
       {
         onChanged: () => void this.refreshAskInboxViews(),
-        onReady: () => {
+        onReady: (job) => {
           new Notice(this.t("Learning OS：有 1 条 AI 回答待处理。", "Learning OS: 1 AI answer is ready for review."));
+          void this.stageInlineDraftForReadyJob(job);
         },
         onNotice: (message) => {
           new Notice(message);
@@ -365,7 +374,9 @@ export default class AdaptiveLearningOsPlugin extends Plugin {
     const markdown = editor.getValue();
     const selectionStart = positionToOffset(markdown, editor.getCursor("from"));
     const selectionEnd = positionToOffset(markdown, editor.getCursor("to"));
-    const physicalSourceMode = detectAskSourceMode(markdown, selectionStart, selectionEnd);
+    const learningOsContainer = findLearningOsContainerAtSelection(markdown, selectionStart, selectionEnd);
+    const physicalSourceMode =
+      learningOsContainer?.type ?? detectAskSourceMode(markdown, selectionStart, selectionEnd);
     const selectedOriginalContext = resolveOriginalProseContext({
       markdown,
       selectionStart,
@@ -376,13 +387,14 @@ export default class AdaptiveLearningOsPlugin extends Plugin {
       selectedOriginalContext.sourceBlock ??
       getSemanticSourceBlockAtSelection(markdown, selectionStart, selectionEnd);
     const physicalAnnotation =
-      physicalSourceMode === "clarification-item"
-        ? findClarificationNearSelection(markdown, selectionStart, selectionEnd)
+      learningOsContainer?.type === "clarification-item"
+        ? {
+            clarificationId: learningOsContainer.containerId,
+            blockStart: learningOsContainer.blockStart,
+            blockEnd: learningOsContainer.blockEnd,
+          }
         : null;
-    const generatedAnnotation =
-      physicalSourceMode === "generated-content-item"
-        ? findGeneratedContentNearSelection(markdown, selectionStart, selectionEnd)
-        : null;
+    const generatedAnnotation = learningOsContainer?.type === "generated-content-item" ? learningOsContainer : null;
     const associatedAnnotation =
       physicalAnnotation ??
       (physicalSourceMode === "normal-note"
@@ -422,24 +434,49 @@ export default class AdaptiveLearningOsPlugin extends Plugin {
     if (physicalAnnotation) {
       const blockMarkdown = markdown.slice(physicalAnnotation.blockStart, physicalAnnotation.blockEnd);
       const itemContext = learningOsItemContextFromBlock(
-        blockMarkdown,
-        physicalAnnotation.clarificationId,
-        selectedText,
-        existingRecord?.items ?? []
+        {
+          blockMarkdown,
+          containerId: physicalAnnotation.clarificationId,
+          selectedText,
+          selectionStartInBlock: selectionStart - physicalAnnotation.blockStart,
+          fallbackItems: existingRecord?.items ?? [],
+        }
       );
+      if (!itemContext) {
+        new Notice(this.t("无法准确定位本次选中的 Learning OS item，请重新选择后重试。", "Could not precisely locate the selected Learning OS item. Please reselect and try again."));
+        return;
+      }
       if (itemContext) {
         context.askSourceMode = "clarification-item";
         context.selectedLearningOsItem = itemContext.selected;
         context.siblingLearningOsItems = itemContext.siblings;
+        context.sourceBlock = itemContext.sourceBlock.text;
+        context.sourceBlockHash = itemContext.sourceBlock.hash;
+        context.sourceStartOffset = physicalAnnotation.blockStart + itemContext.sourceBlock.start;
+        context.sourceEndOffset = physicalAnnotation.blockStart + itemContext.sourceBlock.end;
         context.originalSourceBlockBackground = promptSourceBlock.text || existingRecord?.sourceBlock || "";
       }
     } else if (generatedAnnotation) {
       const blockMarkdown = markdown.slice(generatedAnnotation.blockStart, generatedAnnotation.blockEnd);
-      const itemContext = learningOsItemContextFromBlock(blockMarkdown, generatedAnnotation.generatedId, selectedText, []);
+      const itemContext = learningOsItemContextFromBlock({
+        blockMarkdown,
+        containerId: generatedAnnotation.containerId,
+        selectedText,
+        selectionStartInBlock: selectionStart - generatedAnnotation.blockStart,
+        fallbackItems: [],
+      });
+      if (!itemContext) {
+        new Notice(this.t("无法准确定位本次选中的 Learning OS item，请重新选择后重试。", "Could not precisely locate the selected Learning OS item. Please reselect and try again."));
+        return;
+      }
       if (itemContext) {
         context.askSourceMode = "generated-content-item";
         context.selectedLearningOsItem = itemContext.selected;
         context.siblingLearningOsItems = itemContext.siblings;
+        context.sourceBlock = itemContext.sourceBlock.text;
+        context.sourceBlockHash = itemContext.sourceBlock.hash;
+        context.sourceStartOffset = generatedAnnotation.blockStart + itemContext.sourceBlock.start;
+        context.sourceEndOffset = generatedAnnotation.blockStart + itemContext.sourceBlock.end;
         context.originalSourceBlockBackground = promptSourceBlock.text || context.sourceBlock;
       }
     }
@@ -452,7 +489,8 @@ export default class AdaptiveLearningOsPlugin extends Plugin {
       ? {
           clarificationId: existingRecord.id,
           targetItemId: associatedAnnotation
-            ? findTargetItemId(markdown.slice(associatedAnnotation.blockStart, associatedAnnotation.blockEnd), selectedText, existingRecord.items)
+            ? context.selectedLearningOsItem?.itemId ??
+              findTargetItemId(markdown.slice(associatedAnnotation.blockStart, associatedAnnotation.blockEnd), selectedText, existingRecord.items)
             : undefined,
           record: existingRecord,
           visibleMarkdown: associatedAnnotation
@@ -462,7 +500,8 @@ export default class AdaptiveLearningOsPlugin extends Plugin {
       : associatedAnnotation
       ? {
           clarificationId: associatedAnnotation.clarificationId,
-          targetItemId: findTargetItemId(markdown.slice(associatedAnnotation.blockStart, associatedAnnotation.blockEnd), selectedText, []),
+          targetItemId: context.selectedLearningOsItem?.itemId ??
+            findTargetItemId(markdown.slice(associatedAnnotation.blockStart, associatedAnnotation.blockEnd), selectedText, []),
           record: existingRecord,
           visibleMarkdown: markdown.slice(associatedAnnotation.blockStart, associatedAnnotation.blockEnd),
         }
@@ -640,17 +679,154 @@ export default class AdaptiveLearningOsPlugin extends Plugin {
   }
 
   async applyAskJob(job: AskJob, editedVisibleMarkdown?: string): Promise<ApplyAskJobProposalResult> {
-    const result = await applyAskJobProposal({
-      app: this.app,
-      jobStore: this.askJobStore,
-      clarificationStore: this.clarificationStore,
-      settings: this.settings,
-      job,
-      editedVisibleMarkdown,
-    });
-    await this.syncKnowledgeDataAfterApply(job, result);
+    const sourceFile = this.app.vault.getAbstractFileByPath(job.notePath);
+    let draftPreparation:
+      | ReturnType<typeof prepareInlineDraftApply>
+      | { kind: "none" } = { kind: "none" };
+    if (sourceFile && "extension" in sourceFile) {
+      const markdown = await this.app.vault.read(sourceFile as TFile);
+      draftPreparation = prepareInlineDraftApply({
+        markdown,
+        job,
+        settings: this.settings,
+        nowIso: new Date().toISOString(),
+      });
+    }
+    if (draftPreparation.kind === "deleted") {
+      await this.askJobStore.saveJob(draftPreparation.job, "status");
+      await this.askJobService.archive(draftPreparation.job);
+      await this.refreshAskInboxViews();
+      throw new Error(draftPreparation.message);
+    }
+    if (draftPreparation.kind === "target-missing") {
+      await this.askJobStore.saveJob(draftPreparation.job, "failed");
+      await this.refreshAskInboxViews();
+      throw new Error(draftPreparation.message);
+    }
+    let draftOriginalMarkdown: string | null = null;
+    if (draftPreparation.kind === "ready") {
+      const file = this.app.vault.getAbstractFileByPath(draftPreparation.job.notePath);
+      if (file && "extension" in file) {
+        draftOriginalMarkdown = await this.app.vault.read(file as TFile);
+        const withoutDraft = draftPreparation.removeDraft(draftOriginalMarkdown);
+        if (withoutDraft !== draftOriginalMarkdown) {
+          await this.app.vault.modify(file as TFile, withoutDraft);
+        }
+      }
+    }
+    const applyJob = draftPreparation.kind === "ready" ? draftPreparation.job : job;
+    const applyVisibleMarkdown =
+      draftPreparation.kind === "ready" ? draftPreparation.editedVisibleMarkdown : editedVisibleMarkdown;
+    let result: ApplyAskJobProposalResult;
+    try {
+      result = await applyAskJobProposal({
+        app: this.app,
+        jobStore: this.askJobStore,
+        clarificationStore: this.clarificationStore,
+        settings: this.settings,
+        job: applyJob,
+        editedVisibleMarkdown: applyVisibleMarkdown,
+      });
+    } catch (error) {
+      if (draftPreparation.kind === "ready" && draftOriginalMarkdown) {
+        const file = this.app.vault.getAbstractFileByPath(applyJob.notePath);
+        if (file && "extension" in file) {
+          await this.app.vault.modify(file as TFile, draftOriginalMarkdown);
+        }
+      }
+      throw error;
+    }
+    let finalResult = result;
+    if (draftPreparation.kind === "ready") {
+      const file = this.app.vault.getAbstractFileByPath(applyJob.notePath);
+      if (file && "extension" in file) {
+        const afterApply = await this.app.vault.read(file as TFile);
+        const withoutDraft = draftPreparation.removeDraft(afterApply);
+        if (withoutDraft !== afterApply) {
+          await this.app.vault.modify(file as TFile, withoutDraft);
+          finalResult = { ...result, markdown: withoutDraft };
+        }
+      }
+      await this.askJobStore.saveJob(
+        {
+          ...withInlineDraftStatus(applyJob, "applied", "Inline draft was applied and removed."),
+          status: "applied",
+          updated: new Date().toISOString(),
+          appliedClarificationId: result.verification.appliedClarificationId,
+          appliedItemIds: result.verification.appliedItemIds,
+          relatedItemIds: Array.from(new Set([...(applyJob.relatedItemIds ?? []), ...result.verification.appliedItemIds])),
+        },
+        "applied"
+      );
+    }
+    await this.syncKnowledgeDataAfterApply(applyJob, finalResult);
     await this.refreshAskInboxViews();
-    return result;
+    return finalResult;
+  }
+
+  private async stageInlineDraftForReadyJob(job: AskJob): Promise<void> {
+    if (!this.settings.enableExperimentalInlineDraftStaging) return;
+    const sourceFile = this.app.vault.getAbstractFileByPath(job.notePath);
+    if (!sourceFile || !("extension" in sourceFile) || sourceFile.extension !== "md") return;
+    try {
+      const draftStageStartedAt = new Date().toISOString();
+      const markdown = await this.app.vault.read(sourceFile as TFile);
+      const result = stageInlineDraftForJob({
+        markdown,
+        job,
+        settings: this.settings,
+        nowIso: new Date().toISOString(),
+      });
+      if (result.changed) {
+        await this.app.vault.modify(sourceFile as TFile, result.markdown);
+      }
+      const draftStageCompletedAt = new Date().toISOString();
+      await this.askJobStore.saveJob(
+        {
+          ...job,
+          processingStage: "completed",
+          timingDiagnostics: withDraftStageTiming(job.timingDiagnostics, draftStageStartedAt, draftStageCompletedAt),
+          inlineDraft: {
+            draftId: result.draftId ?? `draft-${job.id}`,
+            status: result.status,
+            message: result.message,
+            kind: result.kind,
+            operation: result.operation,
+            targetContainerId: result.targetContainerId,
+            targetItemId: result.targetItemId,
+            targetItemHash: result.targetItemHash,
+            sourceBlockHash: result.sourceBlockHash,
+            itemIds: result.itemIds,
+            createdAt: result.status === "created" ? new Date().toISOString() : job.inlineDraft?.createdAt,
+            contentHash: result.contentHash,
+          },
+          proposalDiagnostics: {
+            ...job.proposalDiagnostics,
+            inlineDraftStageOutcome: result.status,
+            applyabilitySource:
+              result.status === "created" || result.status === "existing-live-draft"
+                ? "live-draft"
+                : job.proposalDiagnostics?.applyabilitySource,
+          },
+        },
+        "status"
+      );
+      await this.refreshAskInboxViews();
+    } catch (error) {
+      console.warn("Learning OS inline draft staging failed.", error);
+      await this.askJobStore.saveJob(
+        {
+          ...job,
+          timingDiagnostics: withDraftStageTiming(job.timingDiagnostics, new Date().toISOString(), new Date().toISOString()),
+          inlineDraft: {
+            draftId: `draft-${job.id}`,
+            status: "fallback-inbox-only",
+            message: "Inline draft staging failed; using Inbox-only Apply.",
+          },
+        },
+        "status"
+      );
+    }
   }
 
   async liveAwarePreviewJob(job: AskJob): Promise<AskJob> {
@@ -827,86 +1003,21 @@ function truncateContext(value: string, maxChars: number, side: "start" | "end")
   return `${value.slice(0, maxChars)}\n...[truncated]`;
 }
 
-interface GeneratedAnnotationMatch {
-  generatedId: string;
-  blockStart: number;
-  blockEnd: number;
-}
-
-function findGeneratedContentNearSelection(
-  markdown: string,
-  selectionStart: number,
-  selectionEnd: number
-): GeneratedAnnotationMatch | null {
-  const pattern = /<!--\s*learnos-generated-id:\s*(gen-[^>\s]+)\s*-->/g;
-  let match: RegExpExecArray | null;
-  while ((match = pattern.exec(markdown)) !== null) {
-    const blockStart = findLearningOsCalloutStart(markdown, match.index);
-    const blockEnd = findLearningOsCalloutEnd(markdown, match.index + match[0].length);
-    if (selectionStart < blockEnd && blockStart < selectionEnd) {
-      return { generatedId: match[1], blockStart, blockEnd };
-    }
-  }
-  return null;
-}
-
-function learningOsItemContextFromBlock(
-  blockMarkdown: string,
-  containerId: string,
-  selectedText: string,
-  fallbackItems: import("./types").ClarificationItem[]
-): {
-  selected: NonNullable<SelectionContext["selectedLearningOsItem"]>;
-  siblings: NonNullable<SelectionContext["siblingLearningOsItems"]>;
-} | null {
-  const needle = selectedText.trim();
-  const liveItems = parseLiveClarificationItemsFromBlock(blockMarkdown, fallbackItems);
-  if (liveItems.length === 0) return null;
-  const selectedLiveItem =
-    liveItems.find(
-      (item) => needle && (item.rawMarkdown.includes(needle) || item.item.explanation.includes(needle) || item.item.itemTitle.includes(needle))
-    ) ?? liveItems[0];
-  return {
-    selected: {
-      containerId,
-      itemId: selectedLiveItem.item.id,
-      itemTitle: selectedLiveItem.item.itemTitle,
-      itemContent: selectedLiveItem.item.explanation,
-    },
-    siblings: liveItems
-      .filter((item) => item.item.id !== selectedLiveItem.item.id)
-      .map((item) => ({
-        itemId: item.item.id,
-        itemTitle: item.item.itemTitle,
-        itemContent: item.item.explanation,
-      })),
+function withDraftStageTiming(
+  current: AskJob["timingDiagnostics"] | undefined,
+  draftStageStartedAt: string,
+  draftStageCompletedAt: string
+): AskJob["timingDiagnostics"] {
+  const next = {
+    ...(current ?? {}),
+    draftStageStartedAt,
+    draftStageCompletedAt,
   };
-}
-
-function findLearningOsCalloutStart(markdown: string, markerStart: number): number {
-  let start = markdown.lastIndexOf("\n", markerStart - 1) + 1;
-  while (start > 0) {
-    const previousEnd = start - 1;
-    const previousStart = markdown.lastIndexOf("\n", previousEnd - 1) + 1;
-    const line = markdown.slice(previousStart, previousEnd);
-    if (!line.trim().startsWith(">") && line.trim() !== "") break;
-    start = previousStart;
-  }
-  return start;
-}
-
-function findLearningOsCalloutEnd(markdown: string, markerEnd: number): number {
-  let cursor = markerEnd;
-  while (cursor < markdown.length) {
-    const nextBreak = markdown.indexOf("\n", cursor);
-    if (nextBreak === -1) return markdown.length;
-    const nextLineStart = nextBreak + 1;
-    const nextLineEnd = markdown.indexOf("\n", nextLineStart);
-    const line = markdown.slice(nextLineStart, nextLineEnd === -1 ? markdown.length : nextLineEnd);
-    if (!line.trim().startsWith(">") && line.trim() !== "") return nextBreak + 1;
-    cursor = nextLineEnd === -1 ? markdown.length : nextLineEnd;
-  }
-  return markdown.length;
+  const duration = Date.parse(draftStageCompletedAt) - Date.parse(draftStageStartedAt);
+  return {
+    ...next,
+    draftStageDurationMs: Number.isFinite(duration) && duration >= 0 ? duration : next.draftStageDurationMs,
+  };
 }
 
 function hasCleanupFindings(plan: OrphanCleanupPlan): boolean {

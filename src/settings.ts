@@ -35,6 +35,7 @@ export const DEFAULT_SETTINGS: LearningOsSettings = {
   enableKnowledgeData: true,
   autoSyncKnowledgeDataAfterApply: true,
   trackKnowledgeDataManualEdits: true,
+  enableExperimentalInlineDraftStaging: false,
 };
 
 export class LearningOsSettingTab extends PluginSettingTab {
@@ -118,6 +119,16 @@ export class LearningOsSettingTab extends PluginSettingTab {
       .addToggle((toggle) =>
         toggle.setValue(this.plugin.settings.trackKnowledgeDataManualEdits).onChange(async (value) => {
           this.plugin.settings.trackKnowledgeDataManualEdits = value;
+          await this.plugin.saveSettings();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Experimental inline draft staging")
+      .setDesc("When enabled, completed Ask jobs create a local draft block near the source. Apply reads the live draft and merges it into the final Learning OS block.")
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.enableExperimentalInlineDraftStaging).onChange(async (value) => {
+          this.plugin.settings.enableExperimentalInlineDraftStaging = value;
           await this.plugin.saveSettings();
         })
       );

@@ -28,6 +28,10 @@ import {
   getSourceBlockAtSelection,
   parseSemanticBlocks,
 } from "../src/editor/SourceBlock.ts";
+import {
+  findLearningOsContainerAtSelection,
+  learningOsItemContextFromBlock,
+} from "../src/ask/LearningOsSourceMapping.ts";
 import { parseAiResponseJson, parseAiResponseOrFallback } from "../src/ask/AiResponseParser.ts";
 import { convertLegacyAskCards } from "../src/ask/LegacyAskCardConverter.ts";
 import {
@@ -56,6 +60,24 @@ function offsetToPos(markdown, offset) {
   const before = markdown.slice(0, offset);
   const lines = before.split(/\r?\n/);
   return { line: lines.length - 1, ch: lines[lines.length - 1].length };
+}
+
+function resolveLearningOsItemForSelection(markdown, selectedText) {
+  const selectionStart = markdown.indexOf(selectedText);
+  assert.notEqual(selectionStart, -1, selectedText);
+  const selectionEnd = selectionStart + selectedText.length;
+  const container = findLearningOsContainerAtSelection(markdown, selectionStart, selectionEnd);
+  assert.ok(container, selectedText);
+  const block = markdown.slice(container.blockStart, container.blockEnd);
+  const context = learningOsItemContextFromBlock({
+    blockMarkdown: block,
+    containerId: container.containerId,
+    selectedText,
+    selectionStartInBlock: selectionStart - container.blockStart,
+    fallbackItems: [],
+  });
+  assert.ok(context, selectedText);
+  return { container, context, block };
 }
 
 const record = {
@@ -752,6 +774,201 @@ test("physical source mode keeps original prose selection as normal-note despite
     detectAskSourceMode(generatedMarkdown, generatedSelectionStart, generatedSelectionStart + "生成内容".length),
     "generated-content-item"
   );
+});
+
+test("runtime selection inside Learning OS item resolves source mode and target item marker", () => {
+  const source = "补充模块 E: Cloud Deployment";
+  const tip = `> [!tip]- 💡 我的理解
+> <!-- learnos-clarification-id: clar-20260705-212857-333-xls6lc-normal-note -->
+>
+> <!-- learnos-item-id: cloud-deployment-def -->
+> **Cloud Deployment（云部署）** Cloud Deployment 是将应用部署到 AWS 等云平台上的过程。`;
+  const generated = `> [!note]- ✍️ AI 生成内容
+> <!-- learnos-generated-id: gen-20260705-234359-425-rp7sfc-normal-note -->
+>
+> <!-- learnos-item-id: item-20260705-225515-讲一个这个的小故事呗 -->
+> **这个的小故事呗** 从前有一家小公司叫面包工坊。`;
+  const markdown = `${source}\n\n${tip}\n\n${generated}`;
+  const tipSelectionStart = markdown.indexOf("AWS");
+  const generatedSelectionStart = markdown.indexOf("面包工坊");
+  const tipBlock = parseSemanticBlocks(markdown).find((block) => block.text.includes("cloud-deployment-def"));
+  const generatedBlock = parseSemanticBlocks(markdown).find((block) =>
+    block.text.includes("item-20260705-225515-讲一个这个的小故事呗")
+  );
+  const collector = new SelectionContextCollector({
+    ...baseSettings,
+    maxSelectedTextChars: 5000,
+    maxContextBeforeChars: 5000,
+    maxContextAfterChars: 5000,
+  });
+  const tipContext = collector.collect(fakeEditor(markdown, "AWS", tipSelectionStart, tipSelectionStart + "AWS".length), {
+    file: { path: "测试.md", basename: "测试" },
+  });
+  const generatedContext = collector.collect(
+    fakeEditor(markdown, "面包工坊", generatedSelectionStart, generatedSelectionStart + "面包工坊".length),
+    { file: { path: "测试.md", basename: "测试" } }
+  );
+
+  assert.equal(detectAskSourceMode(markdown, tipSelectionStart, tipSelectionStart + "AWS".length), "clarification-item");
+  assert.equal(
+    detectAskSourceMode(markdown, generatedSelectionStart, generatedSelectionStart + "面包工坊".length),
+    "generated-content-item"
+  );
+  assert.equal(tipBlock?.clarificationId, "clar-20260705-212857-333-xls6lc-normal-note");
+  assert.match(tipBlock?.text ?? "", /learnos-item-id: cloud-deployment-def/);
+  assert.equal(generatedBlock?.generatedId, "gen-20260705-234359-425-rp7sfc-normal-note");
+  assert.match(generatedBlock?.text ?? "", /learnos-item-id: item-20260705-225515-讲一个这个的小故事呗/);
+  assert.equal(tipContext.selectedText, "AWS");
+  assert.equal(generatedContext.selectedText, "面包工坊");
+});
+
+test("Learning OS source mapping keeps adjacent callouts as separate containers", () => {
+  const markdown = `> [!tip]- 💡 我的理解
+> <!-- learnos-clarification-id: clar-a -->
+>
+> <!-- learnos-item-id: item-a -->
+> **Authentication** 是确认用户身份的过程。
+
+> [!note]- ✍️ AI 生成内容
+> <!-- learnos-generated-id: gen-b -->
+>
+> <!-- learnos-item-id: item-b -->
+> **Caching** 可以减少重复数据库访问。
+>
+> <!-- learnos-item-id: item-b-story -->
+> **小故事** 缓存让数据库休息。
+
+> [!tip]- 💡 我的理解
+> <!-- learnos-clarification-id: clar-c -->
+>
+> <!-- learnos-item-id: item-c -->
+> **Observability** 用于理解系统内部运行状态。
+
+> [!note]- ✍️ AI 生成内容
+> <!-- learnos-generated-id: gen-d -->
+>
+> <!-- learnos-item-id: item-d -->
+> **Deployment** 是把应用发布到目标环境。
+
+> [!note]- ✍️ AI 生成内容
+> <!-- learnos-generated-id: gen-e -->
+>
+> <!-- learnos-item-id: item-e -->
+> **Monitoring** 用于持续观察系统指标。
+
+> [!tip]- 💡 我的理解
+> <!-- learnos-clarification-id: clar-f -->
+>
+> <!-- learnos-item-id: item-f -->
+> **Cost Control** 用于控制系统运行费用。
+
+> [!note]- ✍️ AI 生成内容
+> <!-- learnos-generated-id: gen-g -->
+>
+> <!-- learnos-item-id: item-g -->
+> **Tail** 结尾内容。`;
+
+  const cases = [
+    ["Authentication", "clar-a", "item-a", []],
+    ["Caching", "gen-b", "item-b", ["item-b-story"]],
+    ["小故事", "gen-b", "item-b-story", ["item-b"]],
+    ["Observability", "clar-c", "item-c", []],
+    ["Deployment", "gen-d", "item-d", []],
+    ["Monitoring", "gen-e", "item-e", []],
+    ["Cost Control", "clar-f", "item-f", []],
+    ["Tail", "gen-g", "item-g", []],
+  ];
+
+  for (const [needle, containerId, itemId, siblingIds] of cases) {
+    const actual = resolveLearningOsItemForSelection(markdown, needle);
+    assert.equal(actual.container.containerId, containerId, needle);
+    assert.equal(actual.context.selected.itemId, itemId, needle);
+    assert.deepEqual(actual.context.siblings.map((item) => item.itemId), siblingIds, needle);
+    assert.equal(actual.block.includes("clar-c") && containerId !== "clar-c", false, needle);
+    assert.equal(actual.block.includes("gen-e") && containerId !== "gen-e", false, needle);
+  }
+});
+
+test("Learning OS source mapping keeps lazy continuation but stops at the next callout", () => {
+  const markdown = `> [!tip]- 💡 我的理解
+> <!-- learnos-clarification-id: clar-lazy -->
+>
+> <!-- learnos-item-id: item-lazy -->
+> **First** 第一段
+
+lazy continuation belongs here
+
+> [!note]- ✍️ AI 生成内容
+> <!-- learnos-generated-id: gen-next -->
+>
+> <!-- learnos-item-id: item-next -->
+> **Second** 第二个 Callout`;
+
+  const lazy = resolveLearningOsItemForSelection(markdown, "lazy continuation");
+  assert.equal(lazy.container.containerId, "clar-lazy");
+  assert.equal(lazy.context.selected.itemId, "item-lazy");
+  assert.match(lazy.block, /lazy continuation belongs here/);
+  assert.doesNotMatch(lazy.block, /gen-next|Second/);
+
+  const next = resolveLearningOsItemForSelection(markdown, "Second");
+  assert.equal(next.container.containerId, "gen-next");
+  assert.equal(next.context.selected.itemId, "item-next");
+});
+
+test("real source-local failure shapes map Observability Monitoring and Deployment to their own containers", () => {
+  const markdown = `> [!tip]- 💡 我的理解
+> <!-- learnos-clarification-id: clar-final-b1 -->
+>
+> <!-- learnos-item-id: item-final-b1 -->
+> **Authentication** 是确认用户身份的过程。
+
+> [!note]- ✍️ AI 生成内容
+> <!-- learnos-generated-id: gen-final-b2 -->
+>
+> <!-- learnos-item-id: item-final-b2 -->
+> **Caching** 可以减少重复数据库访问。
+>
+> <!-- learnos-item-id: item-story-b2 -->
+> **小故事。** Caching story.
+
+> [!tip]- 💡 我的理解
+> <!-- learnos-clarification-id: clar-final-b3 -->
+>
+> <!-- learnos-item-id: item-final-b3 -->
+> **Observability** 用于理解系统内部运行状态。
+
+> [!note]- ✍️ AI 生成内容
+> <!-- learnos-generated-id: gen-final-b4 -->
+>
+> <!-- learnos-item-id: item-final-b4 -->
+> **Deployment** 是把应用发布到目标环境。
+
+> [!note]- ✍️ AI 生成内容
+> <!-- learnos-generated-id: gen-final-b5 -->
+>
+> <!-- learnos-item-id: item-final-b5 -->
+> **Monitoring** 用于持续观察系统指标。
+
+> [!tip]- 💡 我的理解
+> <!-- learnos-clarification-id: clar-final-b6 -->
+>
+> <!-- learnos-item-id: item-final-b6 -->
+> **Cost Control** 用于控制系统运行费用。`;
+
+  const observability = resolveLearningOsItemForSelection(markdown, "解系统内");
+  assert.equal(observability.container.containerId, "clar-final-b3");
+  assert.equal(observability.context.selected.itemId, "item-final-b3");
+  assert.equal(observability.context.selected.itemTitle, "Observability");
+
+  const monitoring = resolveLearningOsItemForSelection(markdown, "Monitoring");
+  assert.equal(monitoring.container.containerId, "gen-final-b5");
+  assert.equal(monitoring.context.selected.itemId, "item-final-b5");
+  assert.deepEqual(monitoring.context.siblings, []);
+
+  const deployment = resolveLearningOsItemForSelection(markdown, "是把应用发布到目标环境");
+  assert.equal(deployment.container.containerId, "gen-final-b4");
+  assert.equal(deployment.context.selected.itemId, "item-final-b4");
+  assert.deepEqual(deployment.context.siblings, []);
 });
 
 test("original prose context ignores Learning OS blocks and never duplicates source as nearby after", () => {

@@ -3,17 +3,23 @@ import {
   INBOX_STATUS_GROUPS,
   INBOX_TABS,
   actionSetForJob,
+  applyDisabledReasonForJob,
   displayAnswerForJob,
+  displayProcessingStatusForJob,
+  displaySourceTextForJob,
   emptyStateKind,
   jobsForGroup,
   jobsForTab,
+  inboxRenderModel,
   nextJobIdInTab,
   nextReadyJobIdAfterApply,
   readyCount,
   resolveSelectedJobIdForTab,
+  uniqueJobsById,
 } from "./AskInboxState";
 import { findSourceAnchor } from "./AskSourceNavigation";
 import { generatedContentMissingWarning } from "../ask/AskIntent";
+import { inlineDraftStatusMessage } from "../ask/InlineDraftStaging";
 import type AdaptiveLearningOsPlugin from "../main";
 import type { AskJob } from "../types";
 import type { InboxTabId } from "./AskInboxState";
@@ -26,6 +32,9 @@ export class AskInboxView extends ItemView {
   private activeTab: InboxTabId = "ready";
   private currentJobs: AskJob[] = [];
   private proposalDrafts = new Map<string, string>();
+  private refreshGeneration = 0;
+  private stickyApplyButton: HTMLButtonElement | null = null;
+  private stickyApplyJobId: string | null = null;
 
   constructor(leaf: WorkspaceLeaf, private plugin: AdaptiveLearningOsPlugin) {
     super(leaf);
@@ -48,12 +57,18 @@ export class AskInboxView extends ItemView {
   }
 
   async refresh(): Promise<void> {
+    const generation = ++this.refreshGeneration;
+    const jobs = uniqueJobsById(await this.plugin.listAskJobs());
+    if (generation !== this.refreshGeneration) return;
+
     const { contentEl } = this;
     contentEl.empty();
     contentEl.addClass("learning-os-inbox");
     contentEl.createEl("h2", { text: this.getDisplayText() });
+    this.stickyApplyButton = null;
+    this.stickyApplyJobId = null;
 
-    this.currentJobs = await this.plugin.listAskJobs();
+    this.currentJobs = jobs;
     if (this.activeTab === "history" && !this.showHistory) {
       this.activeTab = "ready";
     }
@@ -133,10 +148,9 @@ export class AskInboxView extends ItemView {
     const tabJobs = jobsForTab(this.currentJobs, this.activeTab);
     const tab = INBOX_TABS.find((item) => item.id === this.activeTab);
     const label = tab ? this.plugin.t(tab.zh, tab.en) : this.plugin.t("待处理", "Ready");
-    const selectedJob = this.selectedJobId ? this.currentJobs.find((job) => job.id === this.selectedJobId) : null;
-
     const selectedIndex = tabJobs.findIndex((job) => job.id === this.selectedJobId);
     const nav = parent.createDiv({ cls: "learning-os-current-nav learning-os-job-action-bar--sticky" });
+    nav.setAttr("data-learnos-inbox-section", "sticky-actions");
     nav.createEl("strong", {
       text: `${label} (${tabJobs.length === 0 ? 0 : Math.max(0, selectedIndex + 1)}/${tabJobs.length})`,
     });
@@ -156,20 +170,32 @@ export class AskInboxView extends ItemView {
         await this.refresh();
       }
     });
-    const applyButton = nav.createEl("button", {
+    this.renderStickyApplyButton(nav);
+  }
+
+  private renderStickyApplyButton(parent: HTMLElement): void {
+    const model = inboxRenderModel(this.currentJobs, this.selectedJobId, this.activeTab);
+    if (!model.showStickyApply || !model.selectedJob) return;
+    const job = model.selectedJob;
+    const applyButton = parent.createEl("button", {
       text: this.plugin.t("应用建议", "Apply proposal"),
-      cls: "mod-cta",
+      cls: "mod-cta learning-os-sticky-apply-button",
     });
-    applyButton.disabled =
-      this.activeTab !== "ready" ||
-      !selectedJob ||
-      selectedJob.status !== "completed" ||
-      Boolean(selectedJob.applyDisabledReason) ||
-      Boolean(generatedContentMissingWarning(selectedJob.userQuestion, selectedJob.parsedAnswer?.answer ?? selectedJob.rawAnswer ?? ""));
+    applyButton.setAttr("data-learnos-inbox-action", "apply");
+    applyButton.setAttr("data-learnos-job-id", job.id);
+    this.stickyApplyButton = applyButton;
+    this.stickyApplyJobId = job.id;
+    this.updateStickyApplyButton(job);
     applyButton.addEventListener("click", async () => {
+      const selectedJob = this.currentJobs.find((item) => item.id === this.selectedJobId);
       if (!selectedJob || selectedJob.status !== "completed") return;
       await this.applyReadyJob(selectedJob, this.proposalDrafts.get(selectedJob.id));
     });
+  }
+
+  private updateStickyApplyButton(job: AskJob): void {
+    if (!this.stickyApplyButton || this.stickyApplyJobId !== job.id) return;
+    this.stickyApplyButton.disabled = Boolean(applyDisabledReasonForJob(job));
   }
 
   private renderCurrentTabList(parent: HTMLElement): void {
@@ -238,6 +264,7 @@ export class AskInboxView extends ItemView {
 
   private renderReadyDetail(parent: HTMLElement, job: AskJob): void {
     const card = this.createDetailCard(parent, job);
+    card.setAttr("data-learnos-inbox-section", "pending-detail");
     const warningEl = card.createDiv({ cls: "learning-os-readonly learning-os-review-warning" });
     const setWarning = (message?: string) => {
       warningEl.setText(message ?? "");
@@ -246,7 +273,12 @@ export class AskInboxView extends ItemView {
     const generationWarning = (nextJob: AskJob) =>
       generatedContentMissingWarning(nextJob.userQuestion, nextJob.parsedAnswer?.answer ?? nextJob.rawAnswer ?? "");
     const combinedWarning = (nextJob: AskJob) =>
-      [nextJob.reviewWarning, nextJob.applyDisabledReason, generationWarning(nextJob)].filter(Boolean).join("\n\n") ||
+      [
+        inlineDraftStatusMessage(nextJob, this.plugin.settings.uiLanguage),
+        nextJob.reviewWarning,
+        nextJob.applyDisabledReason,
+        generationWarning(nextJob),
+      ].filter(Boolean).join("\n\n") ||
       undefined;
     setWarning(
       combinedWarning(job)
@@ -303,14 +335,7 @@ export class AskInboxView extends ItemView {
     });
     void this.renderMarkdownPreview(proposalPreview, proposalEl.value, job.notePath);
     const actions = card.createDiv({ cls: "learning-os-actions" });
-    const applyButton = actions.createEl("button", { text: this.plugin.t("应用建议", "Apply proposal"), cls: "mod-cta" });
-    const updateApplyButton = (nextJob: AskJob) => {
-      applyButton.disabled = Boolean(nextJob.applyDisabledReason || generationWarning(nextJob));
-    };
-    updateApplyButton(job);
-    applyButton.addEventListener("click", async () => {
-      await this.applyReadyJob(job, proposalEl.value);
-    });
+    this.updateStickyApplyButton(job);
     if (!this.proposalDrafts.has(job.id)) {
       void this.plugin.liveAwarePreviewJob(job).then((previewJob) => {
         if (this.selectedJobId !== job.id || this.proposalDrafts.has(job.id)) return;
@@ -318,7 +343,7 @@ export class AskInboxView extends ItemView {
         proposalEl.value = liveProposal;
         this.proposalDrafts.set(job.id, liveProposal);
         setWarning(combinedWarning(previewJob));
-        updateApplyButton(previewJob);
+        this.updateStickyApplyButton(previewJob);
         void this.renderMarkdownPreview(proposalPreview, liveProposal, job.notePath);
       });
     }
@@ -464,7 +489,7 @@ export class AskInboxView extends ItemView {
     this.meta(
       card,
       this.plugin.t("状态", "Status"),
-      this.plugin.t("此问题正在后台处理中。完成后会出现在“待处理”。", "This ask is processing in the background. It will move to Ready when complete.")
+      displayProcessingStatusForJob(job)
     );
     const actions = card.createDiv({ cls: "learning-os-actions" });
     this.addOpenArchiveActions(actions, job, false);
@@ -478,7 +503,7 @@ export class AskInboxView extends ItemView {
     header.createEl("strong", { text: truncate(job.userQuestion, 120) });
     header.createSpan({ text: ` · ${job.status}` });
     this.meta(card, this.plugin.t("选中文本", "Selected text"), job.selectedText);
-    this.meta(card, this.plugin.t("原文", "Source block"), job.sourceBlock);
+    this.meta(card, this.plugin.t("原文", "Source block"), displaySourceTextForJob(job));
     this.meta(card, this.plugin.t("笔记", "Note"), job.notePath);
     this.meta(card, this.plugin.t("标题路径", "Heading path"), job.headingPath.join(" > ") || "(none)");
     this.meta(card, this.plugin.t("模型", "Provider/model"), `${job.providerMode}${job.model ? ` / ${job.model}` : ""}`);
@@ -635,8 +660,9 @@ export class AskInboxView extends ItemView {
 
   private async applyReadyJob(job: AskJob, editedVisibleMarkdown?: string): Promise<void> {
     try {
-      if (job.applyDisabledReason) {
-        new Notice(job.applyDisabledReason);
+      const disabledReason = applyDisabledReasonForJob(job);
+      if (disabledReason) {
+        new Notice(disabledReason);
         return;
       }
       const nextSelected = nextReadyJobIdAfterApply(this.currentJobs, job.id);

@@ -190,3 +190,52 @@ Use `Clean unused records` to scan all Markdown files for live `learnos-clarific
 Use `Delete job record` when you only want to remove an Inbox history item. This does not delete note content.
 
 A future `Remove clarification from note` action should be separate, explicit, and confirmed because it would edit the Markdown note itself.
+
+## Inline Draft Staging Markers
+
+Phase 2.1.2B adds experimental default-off inline draft staging.
+
+Drafts are visible Markdown callouts in the note, but they are not committed Learning OS knowledge until Apply succeeds.
+
+Example:
+
+```markdown
+> [!todo]- 💡 Learning OS draft
+> <!-- learnos-draft-id: draft-job-... -->
+> <!-- learnos-draft-job-id: job-... -->
+> <!-- learnos-draft-kind: clarification -->
+> <!-- learnos-draft-operation: add-sibling-item -->
+> <!-- learnos-draft-target-container-id: clar-... -->
+> <!-- learnos-draft-target-item-id: item-... -->
+> <!-- learnos-draft-target-item-hash: ... -->
+> <!-- learnos-draft-source-block-hash: ... -->
+> <!-- learnos-draft-created-at: ... -->
+>
+> <!-- learnos-draft-item-id: draft-item-... -->
+> **Draft title** Draft explanation that the user may edit before Apply.
+```
+
+Draft markers intentionally use the `learnos-draft-*` namespace.
+
+They must not be confused with committed markers:
+
+- committed clarification block: `learnos-clarification-id`,
+- committed generated-content block: `learnos-generated-id`,
+- committed item: `learnos-item-id`,
+- draft identity and draft item identity: `learnos-draft-*`.
+
+KnowledgeData ignores drafts because drafts are proposals. A draft becomes KnowledgeData-indexable only after explicit Apply writes verified final markers.
+
+Current supported draft operations:
+
+- `add-item` for normal-note Ask staging,
+- `add-sibling-item` for Ask inside existing clarification/generated-content blocks.
+
+Not implemented in Phase 2.1.2B:
+
+- existing item inline draft rewrite,
+- whole-block rewrite,
+- multi-item rewrite,
+- Review Scheduler,
+- Note Check,
+- Context Pack Builder.

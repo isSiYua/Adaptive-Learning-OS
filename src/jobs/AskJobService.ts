@@ -21,6 +21,7 @@ import type {
   AskJobStatus,
   AskModelRoutingSelection,
   ClarificationItem,
+  ClarificationMergeProposal,
   ClarificationRecord,
   LearningOsSettings,
   SelectionContext,
@@ -97,6 +98,11 @@ export class AskJobService {
     modelSelection?: AskModelRoutingSelection;
   }): Promise<AskJob> {
     const settings = this.getSettings();
+    const sourceValidationError = validateSelectedLearningOsSource(params.context, settings.uiLanguage);
+    if (sourceValidationError) {
+      this.events.onNotice?.(sourceValidationError);
+      throw new Error(sourceValidationError);
+    }
     const now = new Date();
     const nowIso = toLocalIsoString(now);
     const prompt = buildAskPrompt({
@@ -151,6 +157,9 @@ export class AskJobService {
       existingClarificationId: params.existing?.clarificationId,
       targetClarificationId: params.existing?.clarificationId,
       targetItemId: params.existing?.targetItemId,
+      askSourceMode: params.context.askSourceMode,
+      selectedLearningOsItem: params.context.selectedLearningOsItem,
+      siblingLearningOsItems: params.context.siblingLearningOsItems,
       proposedItemId,
       existingClarificationRecordPath: params.existing?.clarificationId
         ? this.clarificationStore.recordPathForId(params.existing.clarificationId)
@@ -181,6 +190,10 @@ export class AskJobService {
       routingReason: modelRoute.routingReason,
       rerunOfJobId: modelRoute.rerunOfJobId,
       prompt,
+      processingStage: "queued",
+      timingDiagnostics: {
+        queuedAt: nowIso,
+      },
     };
 
     await this.store.saveJob(job, "created");
@@ -237,6 +250,16 @@ export class AskJobService {
         rerunOfJobId: modelRoute.rerunOfJobId,
         status: "queued",
         updated: nowIso,
+        processingStage: "queued",
+        timingDiagnostics: withTiming(
+          {
+            ...(job.timingDiagnostics ?? {}),
+            retryCount: (job.timingDiagnostics?.retryCount ?? 0) + 1,
+            retryReason: "manual-retry",
+            lastRetryAt: nowIso,
+          },
+          { queuedAt: nowIso }
+        ),
         rawAnswer: undefined,
         parsedAnswer: undefined,
         mergeProposal: undefined,
@@ -282,6 +305,12 @@ export class AskJobService {
         baseClarificationContentHash: existingRecord?.contentHash,
         baseClarificationUpdated: existingRecord?.updated,
         proposalVisibleMarkdownHash: stableHash(visible),
+        proposalDiagnostics: buildProposalDiagnostics({
+          job,
+          proposal,
+          visible,
+          applyDisabledReason: resolvedLiveContext?.applyDisabledReason,
+        }),
         reviewWarning: resolvedLiveContext?.reviewWarning,
         applyDisabledReason: resolvedLiveContext?.applyDisabledReason,
         error: undefined,
@@ -339,6 +368,12 @@ export class AskJobService {
         baseClarificationUpdated: latestRecord.updated,
         baseVisibleBlockHash: stableHash(currentVisibleMarkdown),
         proposalVisibleMarkdownHash: stableHash(visible),
+        proposalDiagnostics: buildProposalDiagnostics({
+          job,
+          proposal,
+          visible,
+          applyDisabledReason: undefined,
+        }),
         mergeProposal: {
           ...proposal,
           clarificationId: latestRecord.id,
@@ -381,6 +416,12 @@ export class AskJobService {
       }
 
       const provider = this.createApiProvider(this.settingsForJob(settings, current));
+      current = {
+        ...current,
+        processingStage: "waiting-provider",
+        timingDiagnostics: withTiming(current.timingDiagnostics, { providerRequestStartedAt: toLocalIsoString() }),
+      };
+      await this.store.saveJob(current, "status");
       const response = await provider.ask({
         userQuestion: current.userQuestion,
         selectedText: current.selectedText,
@@ -389,8 +430,10 @@ export class AskJobService {
         responseStyle: "normal",
       });
 
+      const providerResponseReceivedAt = toLocalIsoString();
       current = {
         ...current,
+        processingStage: "parsing-answer",
         rawAnswer: response.rawAnswer,
         parsedAnswer: {
           answer: response.answer,
@@ -399,32 +442,48 @@ export class AskJobService {
           mastery_signal: response.suggestedMasterySignal,
           review_needed: response.suggestedReviewNeeded,
         },
+        timingDiagnostics: withTiming(current.timingDiagnostics, {
+          providerResponseReceivedAt,
+          parseCompletedAt: providerResponseReceivedAt,
+        }),
       };
 
+      current = {
+        ...current,
+        processingStage: "building-proposal",
+        timingDiagnostics: withTiming(current.timingDiagnostics, { proposalBuildStartedAt: toLocalIsoString() }),
+      };
+      await this.store.saveJob(current, "status");
       const liveContext = (await this.events.resolveLiveMergeContext?.(current)) ?? null;
       const existingRecord = liveContext ? liveContext.existingRecord : await this.existingRecordForJob(current);
       const proposal = await this.createMergeProposal(current, existingRecord, provider, settings);
+      const visible = proposalPreviewMarkdown({
+        job: current,
+        proposal,
+        existingRecord,
+        settings,
+      });
+      const jobCompletedAt = toLocalIsoString();
       const completed: AskJob = {
         ...current,
         status: "completed",
-        updated: toLocalIsoString(),
+        updated: jobCompletedAt,
+        processingStage: "completed",
         mergeProposal: {
           ...proposal,
-          proposedVisibleMarkdown: proposalPreviewMarkdown({
-            job: current,
-            proposal,
-            existingRecord,
-            settings,
-          }),
+          proposedVisibleMarkdown: visible,
         },
-        proposalVisibleMarkdownHash: stableHash(
-          proposalPreviewMarkdown({
-            job: current,
-            proposal,
-            existingRecord,
-            settings,
-          })
-        ),
+        timingDiagnostics: withTiming(current.timingDiagnostics, {
+          proposalBuildCompletedAt: jobCompletedAt,
+          jobCompletedAt,
+        }),
+        proposalVisibleMarkdownHash: stableHash(visible),
+        proposalDiagnostics: buildProposalDiagnostics({
+          job: current,
+          proposal,
+          visible,
+          applyDisabledReason: liveContext?.applyDisabledReason,
+        }),
         reviewWarning: liveContext?.reviewWarning,
         applyDisabledReason: liveContext?.applyDisabledReason,
         error: undefined,
@@ -435,10 +494,13 @@ export class AskJobService {
       this.events.onReady?.(completed);
       this.resolveWaiters(completed);
     } catch (error) {
+      const failedAt = toLocalIsoString();
       const failed: AskJob = {
         ...current,
         status: "failed",
-        updated: toLocalIsoString(),
+        updated: failedAt,
+        processingStage: "failed",
+        timingDiagnostics: withTiming(current.timingDiagnostics, { jobCompletedAt: failedAt }),
         error: {
           message: error instanceof Error ? error.message : "Unknown AI error",
           retryable: true,
@@ -560,6 +622,9 @@ export class AskJobService {
       sourceStartOffset: job.sourceStartOffset,
       sourceEndOffset: job.sourceEndOffset,
       answerLanguage: job.answerLanguage,
+      askSourceMode: job.askSourceMode,
+      selectedLearningOsItem: job.selectedLearningOsItem,
+      siblingLearningOsItems: job.siblingLearningOsItems,
       sourceSentenceTruncated: false,
       originalSelectionLength: job.selectedText.length,
     };
@@ -568,6 +633,90 @@ export class AskJobService {
 
 function normalizeDuplicateKey(value: string): string {
   return value.trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+function validateSelectedLearningOsSource(context: SelectionContext, uiLanguage: "zh" | "en"): string | null {
+  if (context.askSourceMode !== "clarification-item" && context.askSourceMode !== "generated-content-item") {
+    return null;
+  }
+  const selected = context.selectedLearningOsItem;
+  if (!selected) {
+    return locateSourceError(uiLanguage);
+  }
+  if (context.askSourceMode === "clarification-item" && !selected.containerId.startsWith("clar-")) {
+    return locateSourceError(uiLanguage);
+  }
+  if (context.askSourceMode === "generated-content-item" && !selected.containerId.startsWith("gen-")) {
+    return locateSourceError(uiLanguage);
+  }
+  const selectedText = context.selectedText.trim();
+  const sourceText = `${selected.itemTitle}\n${selected.itemContent}`.trim();
+  if (selectedText && !sourceText.includes(selectedText)) {
+    return locateSourceError(uiLanguage);
+  }
+  if ((context.siblingLearningOsItems ?? []).some((item) => item.itemId === selected.itemId)) {
+    return locateSourceError(uiLanguage);
+  }
+  return null;
+}
+
+function locateSourceError(uiLanguage: "zh" | "en"): string {
+  return uiLanguage === "en"
+    ? "Could not precisely locate the selected Learning OS item. Please reselect and try again."
+    : "无法准确定位本次选中的 Learning OS item，请重新选择后重试。";
+}
+
+function withTiming(
+  current: AskJob["timingDiagnostics"] | undefined,
+  patch: AskJob["timingDiagnostics"]
+): AskJob["timingDiagnostics"] {
+  const next = { ...(current ?? {}), ...patch };
+  const duration = (start?: string, end?: string): number | undefined => {
+    if (!start || !end) return undefined;
+    const value = Date.parse(end) - Date.parse(start);
+    return Number.isFinite(value) && value >= 0 ? value : undefined;
+  };
+  return {
+    ...next,
+    queueDurationMs: duration(next.queuedAt, next.providerRequestStartedAt) ?? next.queueDurationMs,
+    providerDurationMs: duration(next.providerRequestStartedAt, next.providerResponseReceivedAt) ?? next.providerDurationMs,
+    parseDurationMs: duration(next.providerResponseReceivedAt, next.parseCompletedAt) ?? next.parseDurationMs,
+    proposalDurationMs: duration(next.proposalBuildStartedAt, next.proposalBuildCompletedAt) ?? next.proposalDurationMs,
+    draftStageDurationMs: duration(next.draftStageStartedAt, next.draftStageCompletedAt) ?? next.draftStageDurationMs,
+    totalDurationMs: duration(next.queuedAt, next.jobCompletedAt) ?? next.totalDurationMs,
+  };
+}
+
+function buildProposalDiagnostics(params: {
+  job: AskJob;
+  proposal: ClarificationMergeProposal;
+  visible: string;
+  applyDisabledReason?: string;
+}): AskJob["proposalDiagnostics"] {
+  const editableMarkdownLength = params.visible.trim().length;
+  const hasProposalItems = params.proposal.proposedItems.length > 0;
+  const fallbackReason = params.proposal.reasoning?.toLowerCase().includes("fallback")
+    ? params.proposal.reasoning
+    : undefined;
+  return {
+    resolvedSourceMode: params.job.askSourceMode,
+    resolvedTargetContainerId:
+      params.proposal.clarificationId ?? params.proposal.generatedId ?? params.job.selectedLearningOsItem?.containerId,
+    resolvedTargetItemId: params.proposal.targetItemId ?? params.job.targetItemId ?? params.job.selectedLearningOsItem?.itemId,
+    resolvedOutputKind: params.proposal.action,
+    proposalBuildOutcome: editableMarkdownLength > 0 || hasProposalItems ? "non-empty" : "empty",
+    proposalFallbackUsed: Boolean(fallbackReason),
+    proposalFallbackReason: fallbackReason,
+    editableMarkdownLength,
+    inlineDraftStageOutcome: params.job.inlineDraft?.status,
+    applyDisabledReason: params.applyDisabledReason,
+    applyabilitySource:
+      params.job.inlineDraft?.status === "created" || params.job.inlineDraft?.status === "existing-live-draft"
+        ? "live-draft"
+        : editableMarkdownLength > 0 || hasProposalItems
+          ? "proposal"
+          : "none",
+  };
 }
 
 export function buildSourceAnchorKey(params: {

@@ -287,6 +287,10 @@ function findBlockStart(markdown: string, markerStart: number): number {
       break;
     }
     if (!isClarificationLine(line)) break;
+    if (isTopLevelCalloutHeader(line)) {
+      cursor = previousLineStart;
+      break;
+    }
     cursor = previousLineStart;
   }
 
@@ -304,6 +308,7 @@ function findBlockEnd(markdown: string, markerEnd: number): number {
       const lineEnd = nextLineEnd(markdown, cursor);
       const line = markdown.slice(cursor, lineEnd);
       if (!isClarificationLine(line)) break;
+      if (isTopLevelCalloutHeader(line)) break;
       cursor = lineEnd;
       if (markdown[cursor] === "\n") cursor += 1;
     }
@@ -324,6 +329,10 @@ function nextLineEnd(markdown: string, from: number): number {
 
 function isClarificationLine(line: string): boolean {
   return line.trim().startsWith(">");
+}
+
+function isTopLevelCalloutHeader(line: string): boolean {
+  return /^>\s*\[![^\]]+\]/.test(line.trim());
 }
 
 function paragraphRangeAt(markdown: string, selectionStart: number, selectionEnd: number): {

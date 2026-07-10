@@ -1,6 +1,6 @@
 # KnowledgeData Foundation
 
-Status: implemented in Phase 2.1, with automatic sync added in Phase 2.1.1  
+Status: implemented in Phase 2.1, with automatic sync added in Phase 2.1.1 and draft-ignore behavior preserved through Phase 2.1.2B
 Audience: developers and future ChatGPT/Codex conversations  
 Related context docs:
 
@@ -9,8 +9,10 @@ Related context docs:
 - `docs/context/DECISIONS.md`
 - `docs/context/PHASE_HANDOFFS/Phase2_1_KnowledgeData_Handoff.md`
 - `docs/context/PHASE_HANDOFFS/Phase2_1_1_Auto_KnowledgeData_Sync_Handoff.md`
+- `docs/context/PHASE_HANDOFFS/Phase2_1_2B_Natural_Inline_Draft_Staging_Handoff.md`
 - `docs/context/CODEX_REPORTS/Phase2_1_Implementation_Report.md`
 - `docs/context/CODEX_REPORTS/Phase2_1_1_Implementation_Report.md`
+- `docs/context/CODEX_REPORTS/Phase2_1_2B_Implementation_Report.md`
 
 ---
 
@@ -48,6 +50,8 @@ The long-term goal is that future review and tutorial-generation systems can ada
 Phase 2.1 implements only the foundation.
 
 Phase 2.1.1 makes that foundation useful during normal Ask / Inbox / Apply usage by adding safe automatic sync hooks. The live Obsidian note remains the source of truth. KnowledgeData indexes only verified final Learning OS markers and conservative local signals.
+
+Phase 2.1.2B adds experimental inline draft staging to the Ask workflow. KnowledgeData behavior does not change: draft-only `learnos-draft-*` blocks are ignored. Only final `learnos-clarification-id`, `learnos-generated-id`, and `learnos-item-id` markers written by successful Apply enter KnowledgeData.
 
 ---
 
@@ -258,6 +262,42 @@ Total indexed items = all rows in the items table.
 Active items = items with status active.
 Missing/deleted items = items with status missing, deleted, or orphan.
 ```
+
+---
+
+# 4.6 Inline Draft Staging And KnowledgeData
+
+Phase 2.1.2B intentionally keeps inline draft staging separate from KnowledgeData.
+
+Drafts use markers such as:
+
+```markdown
+> <!-- learnos-draft-id: draft-job-... -->
+> <!-- learnos-draft-kind: clarification -->
+> <!-- learnos-draft-operation: add-sibling-item -->
+> <!-- learnos-draft-target-container-id: clar-... -->
+> <!-- learnos-draft-item-id: draft-item-... -->
+```
+
+These markers are proposals, not committed knowledge.
+
+KnowledgeData scanners and sync hooks must continue to ignore them because:
+
+- the user may delete the draft,
+- the user may edit the draft before Apply,
+- a draft may target a missing final block,
+- a draft does not prove coverage or mastery,
+- a draft does not have final `learnos-item-id` identity yet.
+
+After Apply succeeds, the final note contains committed markers:
+
+```markdown
+> <!-- learnos-clarification-id: clar-... -->
+> <!-- learnos-generated-id: gen-... -->
+> <!-- learnos-item-id: item-... -->
+```
+
+At that point the existing Phase 2.1.1 KnowledgeData auto-sync indexes from the verified live Markdown returned by Apply.
 
 Scope:
 

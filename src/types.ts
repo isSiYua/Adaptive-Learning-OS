@@ -57,6 +57,7 @@ export interface LearningOsSettings {
   enableKnowledgeData: boolean;
   autoSyncKnowledgeDataAfterApply: boolean;
   trackKnowledgeDataManualEdits: boolean;
+  enableExperimentalInlineDraftStaging: boolean;
 }
 
 export interface SelectionContext {
@@ -188,6 +189,9 @@ export interface AskJob {
   existingClarificationId?: string;
   targetClarificationId?: string;
   targetItemId?: string;
+  askSourceMode?: AskSourceMode;
+  selectedLearningOsItem?: SelectionContext["selectedLearningOsItem"];
+  siblingLearningOsItems?: SelectionContext["siblingLearningOsItems"];
   proposedItemId?: string;
   relatedItemIds?: string[];
   appliedClarificationId?: string;
@@ -217,6 +221,62 @@ export interface AskJob {
   rawAnswer?: string;
   reviewWarning?: string;
   applyDisabledReason?: string;
+  processingStage?: "queued" | "waiting-provider" | "parsing-answer" | "building-proposal" | "writing-draft" | "completed" | "failed";
+  timingDiagnostics?: {
+    queuedAt?: string;
+    providerRequestStartedAt?: string;
+    providerResponseReceivedAt?: string;
+    parseCompletedAt?: string;
+    proposalBuildStartedAt?: string;
+    proposalBuildCompletedAt?: string;
+    draftStageStartedAt?: string;
+    draftStageCompletedAt?: string;
+    jobCompletedAt?: string;
+    queueDurationMs?: number;
+    providerDurationMs?: number;
+    parseDurationMs?: number;
+    proposalDurationMs?: number;
+    draftStageDurationMs?: number;
+    totalDurationMs?: number;
+    retryCount?: number;
+    retryReason?: string;
+    lastRetryAt?: string;
+  };
+  proposalDiagnostics?: {
+    resolvedSourceMode?: AskSourceMode;
+    resolvedTargetContainerId?: string;
+    resolvedTargetItemId?: string;
+    resolvedOutputKind?: ClarificationMergeProposal["action"];
+    proposalBuildOutcome?: "non-empty" | "empty" | "missing";
+    proposalFallbackUsed?: boolean;
+    proposalFallbackReason?: string;
+    editableMarkdownLength?: number;
+    inlineDraftStageOutcome?: string;
+    applyDisabledReason?: string;
+    applyabilitySource?: "proposal" | "live-draft" | "none";
+  };
+  inlineDraft?: {
+    draftId: string;
+    status:
+      | "created"
+      | "existing-live-draft"
+      | "deleted"
+      | "unsupported-selection"
+      | "empty-proposal"
+      | "fallback-inbox-only"
+      | "applied"
+      | "target-missing";
+    message?: string;
+    kind?: "clarification" | "generated-content";
+    operation?: "add-item" | "add-sibling-item" | "update-item";
+    targetContainerId?: string;
+    targetItemId?: string;
+    targetItemHash?: string;
+    sourceBlockHash?: string;
+    itemIds?: string[];
+    createdAt?: string;
+    contentHash?: string;
+  };
   parsedAnswer?: {
     answer?: string;
     key_answer?: string;
@@ -234,6 +294,12 @@ export interface AskJob {
     missingGeneratedId?: string;
     missingClarificationIds?: string[];
     missingGeneratedIds?: string[];
+    duplicateClarificationIds?: string[];
+    duplicateItemIds?: string[];
+    duplicateGeneratedIds?: string[];
+    ambiguousTargetClarificationIds?: string[];
+    ambiguousTargetItemIds?: string[];
+    ambiguousTargetGeneratedIds?: string[];
     notePath?: string;
     sourceBlockHash?: string;
     targetClarificationId?: string;

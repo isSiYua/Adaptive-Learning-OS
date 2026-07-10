@@ -239,7 +239,7 @@ export function createFallbackMergeProposal(params: {
     relatedInteractionIds: [interactionIdForJob(params.job.id)],
   };
 
-  return {
+  const proposal: ClarificationMergeProposal = {
     schemaVersion: 1,
     action: generated ? "generated-content" : params.existingRecord ? "add-item" : "create-clarification",
     generatedId: generated
@@ -263,6 +263,11 @@ export function createFallbackMergeProposal(params: {
     proposedVisibleMarkdown: generatedWarning && generated ? "" : "",
     reasoning: generatedWarning ?? "Fallback proposal created from the AI answer.",
     confidence: "low",
+  };
+  return {
+    ...proposal,
+    proposedVisibleMarkdown:
+      !generatedWarning && generated ? buildGeneratedContentBlock(proposal, { uiLanguage: params.job.uiLanguage }) : proposal.proposedVisibleMarkdown,
   };
 }
 

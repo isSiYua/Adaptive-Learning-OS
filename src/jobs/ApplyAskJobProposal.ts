@@ -78,6 +78,16 @@ export interface MarkerPreservationVerification {
   missingGeneratedIds: string[];
 }
 
+export interface DuplicateMarkerVerification {
+  ok: boolean;
+  duplicateClarificationIds: string[];
+  duplicateItemIds: string[];
+  duplicateGeneratedIds: string[];
+  ambiguousTargetClarificationIds: string[];
+  ambiguousTargetItemIds: string[];
+  ambiguousTargetGeneratedIds: string[];
+}
+
 const noteApplyLocks = new Map<string, Promise<void>>();
 
 export async function applyAskJobProposal(params: {
@@ -113,7 +123,9 @@ async function applyAskJobProposalUnlocked(params: {
 
   const original = await params.app.vault.read(sourceFile as TFile);
   const preExistingMarkers = collectLearningOsMarkers(original);
-  const liveMatch = findLiveClarificationMatch(original, params.job);
+  const liveMatch = shouldResolveLiveClarificationMatch(params.job)
+    ? findLiveClarificationMatch(original, params.job)
+    : null;
   const currentVisibleMarkdown = liveMatch ? original.slice(liveMatch.blockStart, liveMatch.blockEnd) : "";
   const existingRecord = await existingRecordForJob(params.job, params.clarificationStore);
   const liveRecordFromMarker =
@@ -210,6 +222,23 @@ async function applyAskJobProposalUnlocked(params: {
     });
     throw new Error(applyPreservationMessage(preservation));
   }
+  const duplicates = verifyNoDuplicateMarkerRegression(original, after, {
+    targetClarificationIds: targetClarificationIdsForJob(params.job, record.id),
+    targetItemIds: targetItemIdsForJob(params.job),
+    targetGeneratedIds: targetGeneratedIdsForJob(params.job),
+  });
+  if (!duplicates.ok) {
+    await params.app.vault.modify(sourceFile as TFile, original);
+    await saveDuplicateMarkersFailedJob({
+      jobStore: params.jobStore,
+      job: params.job,
+      notePath: params.job.notePath,
+      duplicates,
+      appliedClarificationId: record.id,
+      appliedItemIds: operationResult.changedItemIds,
+    });
+    throw new Error(duplicateMarkersMessage(duplicates));
+  }
   await params.clarificationStore.saveRecord(record, next.appliedAs);
   await params.jobStore.updateStatus(
     {
@@ -234,6 +263,10 @@ async function applyAskJobProposalUnlocked(params: {
   };
 }
 
+function shouldResolveLiveClarificationMatch(job: AskJob): boolean {
+  return job.askSourceMode !== "generated-content-item";
+}
+
 export function applyClarificationMarkdown(
   markdown: string,
   job: AskJob,
@@ -247,6 +280,17 @@ export function applyClarificationMarkdown(
     return {
       markdown: replaceClarificationBlock(markdown, existingMatch, visible),
       appliedAs: "updated",
+    };
+  }
+
+  const sourceContainer = findSourceLearningOsContainerRange(markdown, job);
+  if (sourceContainer) {
+    const insertAt = sourceContainer.end;
+    return {
+      markdown: `${markdown.slice(0, insertAt).replace(/\s*$/, "")}\n\n${visible}${markdown
+        .slice(insertAt)
+        .replace(/^\n+/, "")}`,
+      appliedAs: "created",
     };
   }
 
@@ -266,9 +310,10 @@ export function applyClarificationMarkdown(
     };
   }
 
+  const insertAt = insertionOffsetAfterLearningOsOutputCluster(markdown, sourceMatch.end);
   return {
-    markdown: `${markdown.slice(0, sourceMatch.end).replace(/\s*$/, "")}\n\n${visible}${markdown
-      .slice(sourceMatch.end)
+    markdown: `${markdown.slice(0, insertAt).replace(/\s*$/, "")}\n\n${visible}${markdown
+      .slice(insertAt)
       .replace(/^\n+/, "")}`,
     appliedAs: "created",
   };
@@ -328,6 +373,23 @@ async function applyGeneratedContentProposal(params: {
     });
     throw new Error(applyPreservationMessage(preservation));
   }
+  const duplicates = verifyNoDuplicateMarkerRegression(params.original, after, {
+    targetClarificationIds: targetClarificationIdsForJob(params.job),
+    targetItemIds: targetItemIdsForJob(params.job),
+    targetGeneratedIds: targetGeneratedIdsForJob(params.job, generatedId),
+  });
+  if (!duplicates.ok) {
+    await params.app.vault.modify(params.sourceFile, params.original);
+    await saveDuplicateMarkersFailedJob({
+      jobStore: params.jobStore,
+      job: params.job,
+      notePath: params.job.notePath,
+      duplicates,
+      appliedGeneratedId: generatedId,
+      appliedItemIds,
+    });
+    throw new Error(duplicateMarkersMessage(duplicates));
+  }
 
   const now = new Date().toISOString();
   const record = generatedRecordForResult(params.job, generatedId, params.proposal, appliedItemIds, params.settings, now);
@@ -372,11 +434,22 @@ function applyGeneratedContentMarkdown(
       appliedAs: "updated",
     };
   }
+  const sourceContainer = findSourceLearningOsContainerRange(markdown, job);
+  if (sourceContainer) {
+    const insertAt = sourceContainer.end;
+    return {
+      markdown: `${markdown.slice(0, insertAt).replace(/\s*$/, "")}\n\n${ensureBlockSpacing(visible)}${markdown
+        .slice(insertAt)
+        .replace(/^\n+/, "")}`,
+      appliedAs: "created",
+    };
+  }
   const sourceMatch = findSourceBlockRange(markdown, job);
   if (sourceMatch.exists) {
+    const insertAt = insertionOffsetAfterLearningOsOutputCluster(markdown, sourceMatch.end);
     return {
-      markdown: `${markdown.slice(0, sourceMatch.end).replace(/\s*$/, "")}\n\n${ensureBlockSpacing(visible)}${markdown
-        .slice(sourceMatch.end)
+      markdown: `${markdown.slice(0, insertAt).replace(/\s*$/, "")}\n\n${ensureBlockSpacing(visible)}${markdown
+        .slice(insertAt)
         .replace(/^\n+/, "")}`,
       appliedAs: "created",
     };
@@ -390,9 +463,58 @@ function applyGeneratedContentMarkdown(
   };
 }
 
+function findSourceLearningOsContainerRange(markdown: string, job: AskJob): { start: number; end: number } | null {
+  if (job.askSourceMode === "clarification-item") {
+    const targetIds = uniqueDefined([
+      job.selectedLearningOsItem?.containerId?.startsWith("clar-") ? job.selectedLearningOsItem.containerId : undefined,
+      job.targetClarificationId,
+      job.existingClarificationId,
+      job.inlineDraft?.targetContainerId?.startsWith("clar-") ? job.inlineDraft.targetContainerId : undefined,
+    ]);
+    for (const targetId of targetIds) {
+      const match = findAllClarificationAnnotations(markdown).find((item) => item.clarificationId === targetId);
+      if (match) return { start: match.blockStart, end: match.blockEnd };
+    }
+    return null;
+  }
+  if (job.askSourceMode === "generated-content-item") {
+    const targetIds = uniqueDefined([
+      job.selectedLearningOsItem?.containerId?.startsWith("gen-") ? job.selectedLearningOsItem.containerId : undefined,
+      job.inlineDraft?.targetContainerId?.startsWith("gen-") ? job.inlineDraft.targetContainerId : undefined,
+    ]);
+    for (const targetId of targetIds) {
+      const match = findAllGeneratedAnnotations(markdown).find((item) => item.generatedId === targetId);
+      if (match) return { start: match.blockStart, end: match.blockEnd };
+    }
+  }
+  return null;
+}
+
 function generatedContentFallbackOffset(markdown: string, job: AskJob): number {
   const heading = findHeadingSectionForPath(markdown, job.headingPath);
   return heading?.end ?? markdown.length;
+}
+
+function insertionOffsetAfterLearningOsOutputCluster(markdown: string, sourceEnd: number): number {
+  let cursor = sourceEnd;
+  const outputBlocks = [
+    ...findAllClarificationAnnotations(markdown).map((match) => ({
+      blockStart: match.blockStart,
+      blockEnd: match.blockEnd,
+    })),
+    ...findAllGeneratedAnnotations(markdown).map((match) => ({
+      blockStart: match.blockStart,
+      blockEnd: match.blockEnd,
+    })),
+  ].sort((a, b) => a.blockStart - b.blockStart);
+
+  while (true) {
+    const next = outputBlocks.find(
+      (block) => block.blockStart >= cursor && /^\s*$/.test(markdown.slice(cursor, block.blockStart))
+    );
+    if (!next) return cursor;
+    cursor = Math.max(cursor, next.blockEnd);
+  }
 }
 
 function findHeadingSectionForPath(markdown: string, headingPath: string[]): { start: number; end: number } | null {
@@ -466,6 +588,100 @@ export function verifyMarkerPreservation(
     missingItemIds: missingFrom(before.itemIds, after.itemIds),
     missingGeneratedIds: missingFrom(before.generatedIds, after.generatedIds),
   };
+}
+
+export function verifyNoDuplicateMarkers(markdown: string, scope?: Partial<LearningOsMarkers>): DuplicateMarkerVerification {
+  const counts = countLearningOsMarkers(markdown);
+  const duplicateClarificationIds = duplicateIds(counts.clarificationIds, scope?.clarificationIds);
+  const duplicateItemIds = duplicateIds(counts.itemIds, scope?.itemIds);
+  const duplicateGeneratedIds = duplicateIds(counts.generatedIds, scope?.generatedIds);
+  return {
+    ok: duplicateClarificationIds.length === 0 && duplicateItemIds.length === 0 && duplicateGeneratedIds.length === 0,
+    duplicateClarificationIds,
+    duplicateItemIds,
+    duplicateGeneratedIds,
+    ambiguousTargetClarificationIds: [],
+    ambiguousTargetItemIds: [],
+    ambiguousTargetGeneratedIds: [],
+  };
+}
+
+export function verifyNoDuplicateMarkerRegression(
+  beforeMarkdown: string,
+  afterMarkdown: string,
+  targets: {
+    targetClarificationIds?: string[];
+    targetItemIds?: string[];
+    targetGeneratedIds?: string[];
+  } = {}
+): DuplicateMarkerVerification {
+  const before = countLearningOsMarkers(beforeMarkdown);
+  const after = countLearningOsMarkers(afterMarkdown);
+  const ambiguousTargetClarificationIds = ambiguousTargetIds(before.clarificationIds, targets.targetClarificationIds);
+  const ambiguousTargetItemIds = ambiguousTargetIds(before.itemIds, targets.targetItemIds);
+  const ambiguousTargetGeneratedIds = ambiguousTargetIds(before.generatedIds, targets.targetGeneratedIds);
+  const duplicateClarificationIds = worsenedDuplicateIds(before.clarificationIds, after.clarificationIds);
+  const duplicateItemIds = worsenedDuplicateIds(before.itemIds, after.itemIds);
+  const duplicateGeneratedIds = worsenedDuplicateIds(before.generatedIds, after.generatedIds);
+  return {
+    ok:
+      ambiguousTargetClarificationIds.length === 0 &&
+      ambiguousTargetItemIds.length === 0 &&
+      ambiguousTargetGeneratedIds.length === 0 &&
+      duplicateClarificationIds.length === 0 &&
+      duplicateItemIds.length === 0 &&
+      duplicateGeneratedIds.length === 0,
+    duplicateClarificationIds,
+    duplicateItemIds,
+    duplicateGeneratedIds,
+    ambiguousTargetClarificationIds,
+    ambiguousTargetItemIds,
+    ambiguousTargetGeneratedIds,
+  };
+}
+
+function ambiguousTargetIds(counts: Map<string, number>, targetIds?: string[]): string[] {
+  return uniqueDefined(targetIds ?? []).filter((id) => (counts.get(id) ?? 0) > 1);
+}
+
+function worsenedDuplicateIds(before: Map<string, number>, after: Map<string, number>): string[] {
+  const ids = new Set([...before.keys(), ...after.keys()]);
+  return Array.from(ids).filter((id) => {
+    const beforeCount = before.get(id) ?? 0;
+    const afterCount = after.get(id) ?? 0;
+    return afterCount > 1 && afterCount > beforeCount;
+  });
+}
+
+function targetClarificationIdsForJob(job: AskJob, appliedClarificationId?: string): string[] {
+  return uniqueDefined([
+    job.existingClarificationId,
+    job.targetClarificationId,
+    job.selectedLearningOsItem?.containerId?.startsWith("clar-") ? job.selectedLearningOsItem.containerId : undefined,
+    job.inlineDraft?.targetContainerId?.startsWith("clar-") ? job.inlineDraft.targetContainerId : undefined,
+    appliedClarificationId,
+  ]);
+}
+
+function targetItemIdsForJob(job: AskJob): string[] {
+  return uniqueDefined([
+    job.askSourceMode && job.askSourceMode !== "normal-note" ? job.targetItemId : undefined,
+    job.selectedLearningOsItem?.itemId,
+    job.inlineDraft?.targetItemId,
+  ]);
+}
+
+function targetGeneratedIdsForJob(job: AskJob, appliedGeneratedId?: string): string[] {
+  return uniqueDefined([
+    job.selectedLearningOsItem?.containerId?.startsWith("gen-") ? job.selectedLearningOsItem.containerId : undefined,
+    job.inlineDraft?.targetContainerId?.startsWith("gen-") ? job.inlineDraft.targetContainerId : undefined,
+    job.mergeProposal?.generatedId,
+    appliedGeneratedId,
+  ]);
+}
+
+function uniqueDefined(values: Array<string | null | undefined>): string[] {
+  return Array.from(new Set(values.map((value) => value?.trim()).filter((value): value is string => Boolean(value))));
 }
 
 async function withNoteApplyLock<T>(notePath: string, fn: () => Promise<T>): Promise<T> {
@@ -557,6 +773,44 @@ async function savePreservationFailedJob(params: {
   );
 }
 
+async function saveDuplicateMarkersFailedJob(params: {
+  jobStore: AskJobStore;
+  job: AskJob;
+  notePath: string;
+  duplicates: DuplicateMarkerVerification;
+  appliedClarificationId?: string;
+  appliedGeneratedId?: string;
+  appliedItemIds: string[];
+}): Promise<void> {
+  const failedAt = new Date().toISOString();
+  await params.jobStore.saveJob(
+    {
+      ...params.job,
+      status: "failed",
+      updated: failedAt,
+      appliedClarificationId: params.appliedClarificationId,
+      appliedItemIds: params.appliedItemIds,
+      relatedItemIds: Array.from(new Set([...(params.job.relatedItemIds ?? []), ...params.appliedItemIds])),
+      targetClarificationId: params.appliedClarificationId,
+      error: {
+        message: duplicateMarkersMessage(params.duplicates),
+        code: "apply-duplicate-markers-failed",
+        retryable: true,
+        duplicateClarificationIds: params.duplicates.duplicateClarificationIds,
+        duplicateItemIds: params.duplicates.duplicateItemIds,
+        duplicateGeneratedIds: params.duplicates.duplicateGeneratedIds,
+        ambiguousTargetClarificationIds: params.duplicates.ambiguousTargetClarificationIds,
+        ambiguousTargetItemIds: params.duplicates.ambiguousTargetItemIds,
+        ambiguousTargetGeneratedIds: params.duplicates.ambiguousTargetGeneratedIds,
+        notePath: params.notePath,
+        sourceBlockHash: params.job.sourceBlockHash,
+        targetClarificationId: params.appliedClarificationId,
+      },
+    },
+    "failed"
+  );
+}
+
 function markerExists(markdown: string, markerName: string, id: string): boolean {
   const escaped = escapeRegExp(id);
   return new RegExp(`<!--\\s*${markerName}:\\s*${escaped}(?:\\s|;|-->)`, "m").test(markdown);
@@ -577,6 +831,33 @@ function applyPreservationMessage(preservation: MarkerPreservationVerification):
   return `Apply preservation failed: writing this proposal would remove pre-existing Learning OS markers (${missing}). The note was rolled back.`;
 }
 
+function duplicateMarkersMessage(duplicates: DuplicateMarkerVerification): string {
+  const ambiguous = [
+    duplicates.ambiguousTargetClarificationIds.length > 0
+      ? `clarifications ${duplicates.ambiguousTargetClarificationIds.join(", ")}`
+      : "",
+    duplicates.ambiguousTargetItemIds.length > 0 ? `items ${duplicates.ambiguousTargetItemIds.join(", ")}` : "",
+    duplicates.ambiguousTargetGeneratedIds.length > 0
+      ? `generated content ${duplicates.ambiguousTargetGeneratedIds.join(", ")}`
+      : "",
+  ]
+    .filter(Boolean)
+    .join("; ");
+  if (ambiguous) {
+    return `Apply failed: the target Learning OS marker appears multiple times, so the target block is ambiguous (${ambiguous}). The note was rolled back.`;
+  }
+  const duplicated = [
+    duplicates.duplicateClarificationIds.length > 0
+      ? `clarifications ${duplicates.duplicateClarificationIds.join(", ")}`
+      : "",
+    duplicates.duplicateItemIds.length > 0 ? `items ${duplicates.duplicateItemIds.join(", ")}` : "",
+    duplicates.duplicateGeneratedIds.length > 0 ? `generated content ${duplicates.duplicateGeneratedIds.join(", ")}` : "",
+  ]
+    .filter(Boolean)
+    .join("; ");
+  return `Apply duplicate-marker check failed: writing this proposal would duplicate Learning OS markers (${duplicated}). The note was rolled back.`;
+}
+
 function uniqueMatches(markdown: string, pattern: RegExp): string[] {
   const ids = new Set<string>();
   let match: RegExpExecArray | null;
@@ -586,6 +867,34 @@ function uniqueMatches(markdown: string, pattern: RegExp): string[] {
     if (id) ids.add(id);
   }
   return Array.from(ids);
+}
+
+function countMatchesById(markdown: string, pattern: RegExp): Map<string, number> {
+  const counts = new Map<string, number>();
+  let match: RegExpExecArray | null;
+  pattern.lastIndex = 0;
+  while ((match = pattern.exec(markdown)) !== null) {
+    const id = match[1] ?? match[2];
+    if (id) counts.set(id, (counts.get(id) ?? 0) + 1);
+  }
+  return counts;
+}
+
+function countLearningOsMarkers(markdown: string): {
+  clarificationIds: Map<string, number>;
+  itemIds: Map<string, number>;
+  generatedIds: Map<string, number>;
+} {
+  return {
+    clarificationIds: countMatchesById(markdown, /<!--\s*learnos-clarification-id:\s*([^>\s]+)\s*-->|%%\s*learnos-clarification-id:\s*([^%\s]+)\s*%%/g),
+    itemIds: countMatchesById(markdown, /<!--\s*learnos-item-id:\s*([^>;\s]+)(?:;\s*ask-ids:\s*[^>]+)?\s*-->/g),
+    generatedIds: countMatchesById(markdown, /<!--\s*learnos-generated-id:\s*([^>\s]+)\s*-->/g),
+  };
+}
+
+function duplicateIds(counts: Map<string, number>, scope?: string[]): string[] {
+  const ids = scope ? Array.from(new Set(scope)) : Array.from(counts.keys());
+  return ids.filter((id) => (counts.get(id) ?? 0) > 1);
 }
 
 function missingFrom(before: string[], after: string[]): string[] {
@@ -685,6 +994,7 @@ export function findLiveClarificationMatch(markdown: string, job: AskJob) {
     : null;
   if (explicitId) {
     const byId = matches.find((match) => match.clarificationId === explicitId);
+    if (byId && shouldTrustExplicitClarificationTarget(job, explicitId)) return byId;
     if (byId && (!sourceMatch.exists || adjacent?.clarificationId === explicitId)) return byId;
   }
 
@@ -693,6 +1003,13 @@ export function findLiveClarificationMatch(markdown: string, job: AskJob) {
 
 function findSourceBlockRange(markdown: string, job: AskJob) {
   return resolveSourceBlockInLiveNote(markdown, job);
+}
+
+function shouldTrustExplicitClarificationTarget(job: AskJob, clarificationId: string): boolean {
+  return (
+    job.askSourceMode === "clarification-item" &&
+    (job.selectedLearningOsItem?.containerId === clarificationId || job.inlineDraft?.targetContainerId === clarificationId)
+  );
 }
 
 function proposalContainsItem(
@@ -796,29 +1113,47 @@ function ensureBlockSpacing(markdown: string): string {
 }
 
 function findCalloutBlockStart(markdown: string, markerStart: number): number {
-  let start = markdown.lastIndexOf("\n", markerStart);
+  let start = markdown.lastIndexOf("\n", markerStart - 1) + 1;
   while (start > 0) {
-    const previousLineStart = markdown.lastIndexOf("\n", start - 1) + 1;
-    const line = markdown.slice(previousLineStart, start);
+    const previousEnd = start - 1;
+    const previousLineStart = markdown.lastIndexOf("\n", previousEnd - 1) + 1;
+    const line = markdown.slice(previousLineStart, previousEnd);
     if (!line.trim().startsWith(">") && line.trim() !== "") break;
-    start = previousLineStart - 1;
+    if (isTopLevelCalloutHeader(line)) {
+      start = previousLineStart;
+      break;
+    }
+    start = previousLineStart;
   }
-  const next = start < 0 ? 0 : start + 1;
-  return markdown.slice(next, markerStart).includes("[!note]") ? next : markdown.lastIndexOf("\n", markerStart) + 1;
+  return markdown.slice(start, markerStart).includes("[!note]") ? start : markdown.lastIndexOf("\n", markerStart - 1) + 1;
 }
 
 function findCalloutBlockEnd(markdown: string, markerEnd: number): number {
   let cursor = markerEnd;
+  let previousWasQuoted = true;
+  let afterBlank = false;
   while (cursor < markdown.length) {
     const nextBreak = markdown.indexOf("\n", cursor);
     if (nextBreak === -1) return markdown.length;
     const nextLineStart = nextBreak + 1;
     const nextLineEnd = markdown.indexOf("\n", nextLineStart);
     const line = markdown.slice(nextLineStart, nextLineEnd === -1 ? markdown.length : nextLineEnd);
-    if (!line.trim().startsWith(">") && line.trim() !== "") return nextBreak + 1;
+    const trimmed = line.trim();
+    if (!trimmed.startsWith(">") && trimmed !== "" && (!previousWasQuoted || afterBlank)) return nextBreak + 1;
+    if (isTopLevelCalloutHeader(line)) return nextBreak + 1;
+    if (trimmed === "") {
+      afterBlank = true;
+    } else {
+      previousWasQuoted = trimmed.startsWith(">");
+      afterBlank = false;
+    }
     cursor = nextLineEnd === -1 ? markdown.length : nextLineEnd;
   }
   return markdown.length;
+}
+
+function isTopLevelCalloutHeader(line: string): boolean {
+  return /^>\s*\[![^\]]+\]/.test(line.trim());
 }
 
 function recordWithLiveVisibleItems(
@@ -828,9 +1163,10 @@ function recordWithLiveVisibleItems(
   settings: Pick<LearningOsSettings, "uiLanguage" | "answerLanguage">,
   liveClarificationId?: string
 ): ClarificationRecord {
-  const liveItems = parseLiveClarificationItemsFromBlock(currentVisibleMarkdown, latestRecord?.items ?? []);
+  const fallbackItems = job.inlineDraft ? [] : latestRecord?.items ?? [];
+  const liveItems = parseLiveClarificationItemsFromBlock(currentVisibleMarkdown, fallbackItems);
   const items = liveItemsToClarificationItems(liveItems);
-  if (items.length === 0 && latestRecord) return latestRecord;
+  if (items.length === 0 && latestRecord && !job.inlineDraft) return latestRecord;
   const now = new Date().toISOString();
   return {
     schemaVersion: 1,
@@ -1032,6 +1368,12 @@ function operationsForProposal(
           itemId: job.proposedItemId ?? operation.itemId ?? createEditedItemId(operation.itemTitle, index + 1),
         };
       }
+      if (operation.op === "add-item" && shouldReplaceGenericNewItemId(job, operation.itemId)) {
+        return {
+          ...operation,
+          itemId: itemIdWithIndex(job.proposedItemId, index) ?? operation.itemId,
+        };
+      }
       return operation;
     });
   }
@@ -1044,6 +1386,19 @@ function operationsForProposal(
   );
   const candidates = newItems.length > 0 ? newItems : proposal.proposedItems.slice(-1);
   return candidates.map((item) => itemToOperation("add-item", job.proposedItemId ?? item.id, item, job.proposedItemId));
+}
+
+function shouldReplaceGenericNewItemId(job: AskJob, itemId: string): boolean {
+  return job.askSourceMode === "normal-note" && isGenericAiItemId(itemId) && Boolean(job.proposedItemId);
+}
+
+function itemIdWithIndex(itemId: string | undefined, index: number): string | undefined {
+  if (!itemId) return undefined;
+  return index === 0 ? itemId : `${itemId}-${index + 1}`;
+}
+
+function isGenericAiItemId(itemId: string): boolean {
+  return /^item-\d+$/i.test(itemId.trim());
 }
 
 function createEditedItemId(title: string, index: number): string {

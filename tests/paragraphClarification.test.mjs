@@ -238,6 +238,26 @@ test("clarification lookup supports html marker identity", () => {
   assert.equal(matches[0].clarificationId, baseRecord.id);
 });
 
+test("clarification lookup does not swallow adjacent inline draft callout", () => {
+  const markdown = `${buildClarificationBlock(baseRecord, { uiLanguage: "zh" })}> [!todo]- 💡 Learning OS draft
+> <!-- learnos-draft-id: draft-job-1 -->
+> <!-- learnos-draft-job-id: job-1 -->
+> <!-- learnos-draft-kind: clarification -->
+> <!-- learnos-draft-operation: add-sibling-item -->
+> <!-- learnos-draft-target-container-id: ${baseRecord.id} -->
+>
+> <!-- learnos-draft-item-id: draft-item-next -->
+> **Next** Draft content.
+
+Tail.`;
+  const matches = findAllClarificationAnnotations(markdown);
+  const block = markdown.slice(matches[0].blockStart, matches[0].blockEnd);
+
+  assert.equal(matches.length, 1);
+  assert.match(block, /learnos-clarification-id/);
+  assert.doesNotMatch(block, /learnos-draft-id/);
+});
+
 test("replace clarification block does not duplicate marker or glue next paragraph", () => {
   const markdown = `${baseRecord.sourceBlock}
 

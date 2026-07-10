@@ -1,7 +1,7 @@
 # Adaptive Learning OS - Master Plan
 
-Version: 2026-07-05 repo context v4  
-Status: updated after Phase 2.1.1 Automatic KnowledgeData Sync implementation  
+Version: 2026-07-05 repo context v5
+Status: updated after Phase 2.1.2B Natural Inline Draft Staging implementation
 Purpose: this is the first file to give a new ChatGPT or Codex conversation when continuing Adaptive Learning OS.
 
 ---
@@ -76,11 +76,13 @@ learning sources
 -> adaptive review and tutorial generation
 ```
 
-Current implementation note after Phase 2.1.1:
+Current implementation note after Phase 2.1.2B:
 
 ```text
 KnowledgeData now initializes and syncs automatically after verified Apply and conservative local note edits.
 Manual rebuild/export/backup commands remain maintenance tools.
+Experimental inline draft staging is implemented and default off.
+Inline drafts let users edit pending Ask output in the note before Apply commits final markers.
 Review scheduling, Note Check, source ingestion, tutorial pipeline, vector DB, web app, and cloud sync remain unimplemented.
 ```
 
@@ -253,6 +255,7 @@ Responsibilities:
 - manual review before apply,
 - clarification block insertion,
 - generated content block insertion,
+- experimental inline draft staging,
 - follow-up questions on existing Learning OS items,
 - source navigation,
 - cleanup of orphan data,
@@ -261,6 +264,14 @@ Responsibilities:
 This subsystem should continue to store raw Ask/job/history records in JSON and JSONL for readability and auditability.
 
 It should not be migrated wholesale to SQLite in Phase 2.1.
+
+Current inline draft note:
+
+```text
+Phase 2.1.2B added default-off natural inline draft staging.
+Drafts use learnos-draft-* markers and never final learnos-item-id markers.
+Apply reads live draft text, converts it into final clarification/generated-content items, verifies final markers, removes the draft, and then lets KnowledgeData sync from verified final content.
+```
 
 ## 4.2 Subsystem B - KnowledgeData / Long-Term Knowledge State Layer
 

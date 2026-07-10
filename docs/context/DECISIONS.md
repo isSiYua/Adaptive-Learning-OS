@@ -1,6 +1,6 @@
 # Adaptive Learning OS - Decisions Log
 
-Version: 2026-07-05 after Phase 2.1.1  
+Version: 2026-07-05 after Phase 2.1.2B
 Purpose: record durable architectural/product decisions so future conversations do not re-litigate them accidentally.
 
 ---
@@ -182,11 +182,48 @@ Implications:
 - Drafts must not use final `learnos-item-id` before Apply.
 - KnowledgeData scans final markers only.
 - Apply/Commit is the boundary where a proposal becomes KnowledgeData-indexable.
-- Phase 2.1.1 includes only draft parser/design/test skeleton, not the user-facing staged draft workflow.
+- Phase 2.1.2B implements the first user-facing staged draft workflow, but keeps it experimental and default off.
 
 Reason:
 
 The user wants easier in-note editing of pending proposals, but the system principle remains: AI output is a proposal until explicit Apply.
+
+## D108 - Inline Draft Apply Reads The Live Draft
+
+Decision:
+
+When experimental inline draft staging is enabled, Apply should prefer the live draft block in the Obsidian note over the older stored Inbox proposal.
+
+Implications:
+
+- user edits inside the draft are the content that gets committed,
+- regenerating/remerging a job must not silently overwrite an existing live draft,
+- deleting the draft means the draft job has nothing to apply,
+- a missing target final block should fail clearly and preserve the draft,
+- the old Inbox proposal remains a fallback/maintenance surface,
+- the final Apply still goes through existing marker verification, preservation, rollback, and KnowledgeData sync.
+
+Reason:
+
+The whole point of inline staging is that the user can edit the proposal in the note before committing it. If Apply ignored the live draft and used stale job JSON, the feature would feel surprising and unsafe.
+
+## D109 - Ask Inside Existing Learning OS Blocks Defaults To Add-Sibling Draft
+
+Decision:
+
+For Phase 2.1.2B, Ask inside an existing clarification item or generated-content item should create an add-sibling draft under the containing block and Apply should merge it back into that same block.
+
+Implications:
+
+- Ask inside `> [!tip]` creates a `learnos-draft-kind: clarification` draft,
+- Ask inside `> [!note]` generated content creates a `learnos-draft-kind: generated-content` draft,
+- operation is `add-sibling-item`,
+- the existing item is not rewritten in this phase,
+- whole-block rewrite and multi-item rewrite remain out of scope.
+
+Reason:
+
+This matches the user's natural expectation: if they ask while looking at a specific Learning OS block, the pending answer should appear nearby and commit back into that block, but without risking destructive rewrites of existing content.
 
 ---
 

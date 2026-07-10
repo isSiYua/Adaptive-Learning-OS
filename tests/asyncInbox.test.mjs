@@ -44,7 +44,9 @@ import {
   actionSetForJob,
   displayAnswerForJob,
   emptyStateKind,
+  displayProcessingStatusForJob,
   historyJobs,
+  inboxRenderModel,
   jobsForGroup,
   jobsForTab,
   nextJobIdInTab,
@@ -55,6 +57,9 @@ import {
   sortJobsForTab,
   tabCounts,
   INBOX_STATUS_GROUPS,
+  applyDisabledReasonForJob,
+  uniqueJobsById,
+  displaySourceTextForJob,
 } from "../src/views/AskInboxState.ts";
 import {
   findLearnOsClarificationAnchor,
@@ -131,6 +136,44 @@ const existingRecord = {
   ],
   interactions: [],
 };
+
+test("Inbox source display uses the current selected Learning OS item for secondary asks", () => {
+  assert.equal(displaySourceTextForJob(job), job.sourceBlock);
+  assert.equal(
+    displaySourceTextForJob({
+      ...job,
+      askSourceMode: "clarification-item",
+      selectedLearningOsItem: {
+        containerId: "clar-source-display",
+        itemId: "item-source-display-tip",
+        itemTitle: "JWT",
+        itemContent: "JWT 是一种自包含令牌。",
+      },
+    }),
+    "JWT JWT 是一种自包含令牌。"
+  );
+  assert.equal(
+    displaySourceTextForJob({
+      ...job,
+      askSourceMode: "generated-content-item",
+      selectedLearningOsItem: {
+        containerId: "gen-source-display",
+        itemId: "item-source-display-generated",
+        itemTitle: "故事",
+        itemContent: "小林把 API Key 贴到了 Slack。",
+      },
+    }),
+    "故事 小林把 API Key 贴到了 Slack。"
+  );
+  assert.equal(
+    displaySourceTextForJob({
+      ...job,
+      askSourceMode: "generated-content-item",
+      selectedLearningOsItem: undefined,
+    }),
+    job.sourceBlock
+  );
+});
 
 test("AskJobStore persists queued running completed failed applied and archived jobs", async () => {
   const fileStore = new MemoryFileStore();
@@ -317,6 +360,198 @@ test("AskJobService records selected model routing metadata", async () => {
   assert.equal(proCreated.requestedModel, "pro");
   assert.equal(proCreated.modelRoutingMode, "manual");
   assert.equal(proCreated.routingReason, "user-selected-pro");
+});
+
+test("AskJobService rejects mismatched Learning OS item source before model call", async () => {
+  const fileStore = new MemoryFileStore();
+  const store = new AskJobStore(fileStore, ".learning-os");
+  const notices = [];
+  const service = new AskJobService(
+    store,
+    { recordPathForId: (id) => `.learning-os/clarifications/${id}.json` },
+    () => ({
+      ...settings,
+      schemaVersion: 1,
+      providerMode: "openai-compatible",
+      providerPreset: "deepseek",
+      providerModel: "test-model",
+      maxConcurrentAskJobs: 2,
+    }),
+    { onNotice: (message) => notices.push(message) }
+  );
+
+  await assert.rejects(
+    service.createBackgroundJob({
+      question: "编一个小故事帮助我理解",
+      context: {
+        notePath: "Phase2_1_2B/FINAL_QA_Source_Local_Apply.md",
+        noteTitle: "FINAL_QA_Source_Local_Apply",
+        selectedText: "解系统内",
+        headingPath: ["B. 复杂 Callout 集合，检查本地插入位置"],
+        currentHeading: "B. 复杂 Callout 集合，检查本地插入位置",
+        parentHeading: null,
+        nearbyBefore: "",
+        nearbyAfter: "",
+        frontmatter: {},
+        detectedConceptIds: ["b-复杂-callout-集合-检查本地插入位置"],
+        sourceBlock: "> **Observability** 用于理解系统内部运行状态。",
+        sourceBlockHash: "e4acbed7",
+        sourceStartOffset: 1401,
+        sourceEndOffset: 1434,
+        askSourceMode: "clarification-item",
+        selectedLearningOsItem: {
+          containerId: "clar-wrong-deployment",
+          itemId: "deployment-1",
+          itemTitle: "Deployment",
+          itemContent: "将应用程序或服务从开发/测试环境发布到目标运行环境。",
+        },
+        siblingLearningOsItems: [],
+        answerLanguage: "zh",
+        sourceSentenceTruncated: false,
+        originalSelectionLength: "解系统内".length,
+      },
+    }),
+    /无法准确定位/
+  );
+  const jobs = await store.listJobs();
+  assert.equal(jobs.length, 0);
+  assert.equal(notices.length, 1);
+});
+
+test("AskJobService records non-negative stage timing diagnostics", async () => {
+  const fileStore = new MemoryFileStore();
+  const store = new AskJobStore(fileStore, ".learning-os");
+  const service = new AskJobService(
+    store,
+    {
+      recordPathForId: (id) => `.learning-os/clarifications/${id}.json`,
+      findByNotePathAndSourceHash: async () => null,
+      readRecord: async () => null,
+    },
+    () => ({
+      ...settings,
+      schemaVersion: 1,
+      providerMode: "openai-compatible",
+      providerPreset: "deepseek",
+      providerModel: "test-model",
+      maxConcurrentAskJobs: 2,
+    })
+  );
+  service.createApiProvider = () => ({
+    ask: async () => ({
+      rawAnswer: "Observability 用于通过日志、指标和追踪理解系统内部状态。",
+      answer: "Observability 用于通过日志、指标和追踪理解系统内部状态。",
+      keyAnswer: "Observability 帮助理解系统内部状态。",
+      suggestedTakeaway: "Observability 通过外部信号理解系统内部运行状态。",
+      suggestedMasterySignal: "neutral",
+      suggestedReviewNeeded: false,
+    }),
+    completePrompt: async () => {
+      throw new Error("force fallback proposal");
+    },
+  });
+
+  const completed = await service.createJobAndWait({
+    question: "这是啥？",
+    context: {
+      notePath: job.notePath,
+      noteTitle: "LOOCV",
+      selectedText: "Observability",
+      headingPath: job.headingPath,
+      currentHeading: "LOOCV",
+      parentHeading: "Resampling",
+      nearbyBefore: "",
+      nearbyAfter: "",
+      frontmatter: {},
+      detectedConceptIds: ["observability"],
+      sourceBlock: "Observability 用于理解系统内部运行状态。",
+      sourceBlockHash: "hash-observability",
+      sourceStartOffset: 0,
+      sourceEndOffset: "Observability 用于理解系统内部运行状态。".length,
+      answerLanguage: "zh",
+      sourceSentenceTruncated: false,
+      originalSelectionLength: "Observability".length,
+    },
+  });
+
+  assert.equal(completed.status, "completed");
+  assert.equal(completed.processingStage, "completed");
+  assert.ok(completed.timingDiagnostics?.queuedAt);
+  assert.ok(completed.timingDiagnostics?.providerRequestStartedAt);
+  assert.ok(completed.timingDiagnostics?.providerResponseReceivedAt);
+  assert.ok(completed.timingDiagnostics?.parseCompletedAt);
+  assert.ok(completed.timingDiagnostics?.proposalBuildStartedAt);
+  assert.ok(completed.timingDiagnostics?.proposalBuildCompletedAt);
+  assert.ok(completed.timingDiagnostics?.jobCompletedAt);
+  for (const key of ["queueDurationMs", "providerDurationMs", "parseDurationMs", "proposalDurationMs", "totalDurationMs"]) {
+    assert.equal(typeof completed.timingDiagnostics?.[key], "number", key);
+    assert.equal(completed.timingDiagnostics[key] >= 0, true, key);
+  }
+  assert.match(
+    displayProcessingStatusForJob(
+      { ...completed, status: "running", processingStage: "waiting-provider" },
+      Date.parse(completed.timingDiagnostics.queuedAt) + 61_000
+    ),
+    /处理时间较长/
+  );
+});
+
+test("AskJobService persists Learning OS source mode for later inline draft staging", async () => {
+  const fileStore = new MemoryFileStore();
+  const store = new AskJobStore(fileStore, ".learning-os");
+  const service = new AskJobService(
+    store,
+    { recordPathForId: (id) => `.learning-os/clarifications/${id}.json` },
+    () => ({
+      ...settings,
+      schemaVersion: 1,
+      providerMode: "manual",
+      providerPreset: "openai",
+      providerModel: "legacy-model",
+      maxConcurrentAskJobs: 2,
+    })
+  );
+  const created = await service.createBackgroundJob({
+    question: "补充这个 tip",
+    context: {
+      notePath: job.notePath,
+      noteTitle: "LOOCV",
+      selectedText: "旧解释保留。",
+      headingPath: job.headingPath,
+      currentHeading: "LOOCV",
+      parentHeading: "Resampling",
+      nearbyBefore: "",
+      nearbyAfter: "",
+      frontmatter: {},
+      detectedConceptIds: [job.detectedConcept],
+      sourceBlock: job.sourceBlock,
+      sourceBlockHash: job.sourceBlockHash,
+      sourceStartOffset: job.sourceStartOffset,
+      sourceEndOffset: job.sourceEndOffset,
+      answerLanguage: "auto",
+      askSourceMode: "clarification-item",
+      selectedLearningOsItem: {
+        containerId: existingRecord.id,
+        itemId: "item-unbiased",
+        itemTitle: "为什么叫无偏？",
+        itemContent: "旧解释保留。",
+      },
+      siblingLearningOsItems: [],
+      sourceSentenceTruncated: false,
+      originalSelectionLength: "旧解释保留。".length,
+    },
+    existing: {
+      clarificationId: existingRecord.id,
+      targetItemId: "item-unbiased",
+      record: existingRecord,
+      visibleMarkdown: buildClarificationBlock(existingRecord, settings),
+    },
+  });
+
+  assert.equal(created.askSourceMode, "clarification-item");
+  assert.equal(created.selectedLearningOsItem?.containerId, existingRecord.id);
+  assert.equal(created.selectedLearningOsItem?.itemId, "item-unbiased");
+  assert.equal(created.existingClarificationId, existingRecord.id);
 });
 
 test("source navigation finds item anchors with flexible html comment spacing", () => {
@@ -1561,6 +1796,130 @@ test("generated content proposal for Babel story renders a non-empty item", () =
   assert.notEqual(preview.trim().split("\n").length <= 3, true);
 });
 
+test("real generated prompt modifiers still create non-empty generated proposals", () => {
+  const cases = [
+    {
+      prompt: "举个例子说明",
+      answer:
+        "以智能客服助手为例，用户询问“帮我查一下订单状态”。Agent 会理解意图，调用订单 API，异常时重试，最后综合上下文回答。",
+      expected: /智能客服助手|订单 API/,
+    },
+    {
+      prompt: "生成一个小故事解释",
+      answer:
+        "在一个叫“LLM 小镇”的地方，住着一位聪明的助手小智。有一天，镇长给了他一本功能电话本，让他调用外部 API 查天气和订奶茶。最后，小智明白 Function Calling 就是让 LLM 真正帮人做事。",
+      expected: /LLM 小镇|功能电话本/,
+    },
+    {
+      prompt: "编一个小故事",
+      answer:
+        "一家小书店把订书系统搬到云端。周末订单突然变多时，云平台自动加机器；周一人少了，又把机器收回去。",
+      expected: /小书店把订书系统搬到云端/,
+    },
+    {
+      prompt: "编一个故事",
+      answer:
+        "一家小书店把订书系统搬到云端。周末订单突然变多时，云平台自动加机器；周一人少了，又把机器收回去。",
+      expected: /小书店把订书系统搬到云端/,
+    },
+    {
+      prompt: "编一个小故事帮助我理解它",
+      answer:
+        "一家小书店把订书系统搬到云端。周末订单突然变多时，云平台自动加机器；周一人少了，又把机器收回去。",
+      expected: /小书店把订书系统搬到云端/,
+    },
+    {
+      prompt: "编一个小故事帮助我理解",
+      answer:
+        "一家小书店把订书系统搬到云端。周末订单突然变多时，云平台自动加机器；周一人少了，又把机器收回去。",
+      expected: /小书店把订书系统搬到云端/,
+    },
+    {
+      prompt: "编一个简短故事",
+      answer:
+        "一家小书店把订书系统搬到云端。周末订单突然变多时，云平台自动加机器；周一人少了，又把机器收回去。",
+      expected: /小书店把订书系统搬到云端/,
+    },
+    {
+      prompt: "再编一个完全不同的故事",
+      answer:
+        "一家小书店把订书系统搬到云端。周末订单突然变多时，云平台自动加机器；周一人少了，又把机器收回去。",
+      expected: /小书店把订书系统搬到云端/,
+    },
+    {
+      prompt: "再补充一个例子",
+      answer:
+        "例如，一个旅行规划 Agent 会先查询天气，再搜索航班，接着预订酒店，最后把完整行程写进日历。",
+      expected: /旅行规划 Agent|查询天气/,
+    },
+    {
+      prompt: "测试一下，编一个小故事",
+      answer:
+        "一家小书店把订书系统搬到云端。周末订单突然变多时，云平台自动加机器；周一人少了，又把机器收回去。",
+      expected: /小书店把订书系统搬到云端/,
+    },
+    {
+      prompt: "测试一下，编一个故事",
+      answer:
+        "一家小书店把订书系统搬到云端。周末订单突然变多时，云平台自动加机器；周一人少了，又把机器收回去。",
+      expected: /小书店把订书系统搬到云端/,
+    },
+  ];
+  for (const { prompt, answer, expected } of cases) {
+    const generatedJob = {
+      ...job,
+      id: `job-real-prompt-${stableHashForTest(prompt)}`,
+      selectedText: "Cloud Deployment",
+      userQuestion: prompt,
+      rawAnswer: answer,
+      parsedAnswer: {
+        answer,
+        key_answer: "生成了一个云部署小故事。",
+        suggested_takeaway: "云部署可以按流量弹性伸缩。",
+        mastery_signal: "neutral",
+        review_needed: false,
+      },
+    };
+    const explanation = primaryProposalSourceText(generatedJob);
+    const proposal = createFallbackMergeProposal({
+      job: generatedJob,
+      existingRecord: null,
+      explanation,
+      nowIso: "2026-07-03T12:02:00+02:00",
+    });
+    const preview = proposalPreviewMarkdown({ job: generatedJob, proposal, existingRecord: null, settings });
+
+    assert.equal(generatedContentMissingWarning(prompt, explanation), null, prompt);
+    assert.equal(proposal.action, "generated-content", prompt);
+    assert.equal(proposal.proposedItems.length, 1, prompt);
+    assert.match(preview, /> \[!note\]- ✍️ AI 生成内容/, prompt);
+    assert.match(preview, /learnos-item-id:/, prompt);
+    assert.match(preview, expected, prompt);
+  }
+});
+
+test("generated satisfaction normalizes Unicode compatibility ideographs", () => {
+  const normalAnswer =
+    "在一个叫“LLM 小镇”的地方，住着一位聪明的助手小智。一天，镇长给他一本功能电话本，让他调用外部 API 查天气。";
+  const compatibilityAnswer =
+    "在⼀个叫“LLM 小镇”的地⽅，住着⼀位聪明的助⼿⼩智。⼀天，镇⻓给他⼀本功能电话本，让他调⽤外部 API 查天⽓。";
+
+  assert.equal(generatedContentMissingWarning("生成一个小故事解释", normalAnswer), null);
+  assert.equal(generatedContentMissingWarning("生成一个小故事解释", compatibilityAnswer), null);
+});
+
+test("generated satisfaction checker still rejects empty refusal and unrelated hard-keyword answers", () => {
+  assert.notEqual(generatedContentMissingWarning("编一个小故事", ""), null);
+  assert.notEqual(generatedContentMissingWarning("编一个小故事", "抱歉，我无法编一个故事。"), null);
+  assert.notEqual(
+    generatedContentMissingWarning(
+      "给我生成一个 cs2 职业选手 niko 的小趣事",
+      "Entropy of Confusion 是一个用于描述困惑程度的概念。"
+    ),
+    null
+  );
+});
+
 test("source-deleted apply policy disables explanation jobs but allows generated-content fallback", () => {
   const deletedState = {
     kind: "no-prior-block",
@@ -1818,6 +2177,123 @@ test("inbox tabs filter running ready failed and history jobs", () => {
     failed: 1,
     history: 3,
   });
+});
+
+test("inbox state dedupes repeated job ids so refresh cannot duplicate pending entries", () => {
+  const duplicateOlder = {
+    ...job,
+    id: "job-duplicate-ready",
+    status: "completed",
+    updated: "2026-07-03T12:00:00+02:00",
+  };
+  const duplicateNewer = {
+    ...duplicateOlder,
+    updated: "2026-07-03T12:05:00+02:00",
+    rawAnswer: "newer answer",
+  };
+  const jobs = [
+    duplicateOlder,
+    duplicateNewer,
+    { ...job, id: "job-running", status: "running" },
+    { ...job, id: "job-failed", status: "failed" },
+  ];
+
+  assert.equal(uniqueJobsById(jobs).length, 3);
+  assert.equal(jobsForTab(jobs, "ready").length, 1);
+  assert.equal(readyCount(jobs), 1);
+  assert.equal(tabCounts(jobs).ready, 1);
+  assert.equal(resolveSelectedJobIdForTab(jobs, null, "ready"), "job-duplicate-ready");
+  assert.equal(jobsForTab(jobs, "ready")[0].rawAnswer, "newer answer");
+});
+
+test("inbox render model exposes one selected detail and one sticky apply target", () => {
+  const jobs = [
+    { ...job, id: "job-ready-a", status: "completed", userQuestion: "A", updated: "2026-07-03T12:01:00+02:00" },
+    { ...job, id: "job-ready-a", status: "completed", userQuestion: "A stale", updated: "2026-07-03T12:00:00+02:00" },
+    { ...job, id: "job-ready-b", status: "completed", userQuestion: "B", updated: "2026-07-03T12:02:00+02:00" },
+  ];
+
+  const model = inboxRenderModel(jobs, "job-ready-a", "ready");
+
+  assert.equal(model.jobs.length, 2);
+  assert.equal(model.tabJobs.length, 2);
+  assert.equal(model.selectedJobId, "job-ready-a");
+  assert.equal(model.selectedJob?.userQuestion, "A");
+  assert.equal(model.showSelectedDetail, true);
+  assert.equal(model.showStickyApply, true);
+});
+
+test("inbox render model updates sticky apply target when selected job changes", () => {
+  const jobs = [
+    { ...job, id: "job-ready-a", status: "completed", userQuestion: "A" },
+    { ...job, id: "job-ready-b", status: "completed", userQuestion: "B" },
+  ];
+
+  const selectedA = inboxRenderModel(jobs, "job-ready-a", "ready");
+  const selectedB = inboxRenderModel(jobs, "job-ready-b", "ready");
+
+  assert.equal(selectedA.selectedJob?.id, "job-ready-a");
+  assert.equal(selectedA.showStickyApply, true);
+  assert.equal(selectedB.selectedJob?.id, "job-ready-b");
+  assert.equal(selectedB.showStickyApply, true);
+});
+
+test("inbox render model tab switch does not duplicate pending state", () => {
+  const jobs = [
+    { ...job, id: "job-ready-a", status: "completed", userQuestion: "A" },
+    { ...job, id: "job-running", status: "running", userQuestion: "Running" },
+  ];
+
+  const readyBefore = inboxRenderModel(jobs, "job-ready-a", "ready");
+  const running = inboxRenderModel(jobs, readyBefore.selectedJobId, "running");
+  const readyAfter = inboxRenderModel(jobs, running.selectedJobId, "ready");
+
+  assert.equal(readyBefore.tabJobs.length, 1);
+  assert.equal(readyBefore.showSelectedDetail, true);
+  assert.equal(readyBefore.showStickyApply, true);
+  assert.equal(running.tabJobs.length, 1);
+  assert.equal(running.showStickyApply, false);
+  assert.equal(readyAfter.tabJobs.length, 1);
+  assert.equal(readyAfter.selectedJobId, "job-ready-a");
+  assert.equal(readyAfter.showSelectedDetail, true);
+  assert.equal(readyAfter.showStickyApply, true);
+});
+
+test("apply disabled state allows an applyable live inline draft despite stale disabled reason", () => {
+  const disabled = applyDisabledReasonForJob({
+    ...job,
+    id: "job-live-draft-overrides-disabled",
+    status: "completed",
+    applyDisabledReason: "原文段落已被删除，因此这个解释不会自动插入到笔记中。",
+    inlineDraft: {
+      draftId: "draft-job-live-draft-overrides-disabled",
+      status: "created",
+    },
+    mergeProposal: {
+      schemaVersion: 1,
+      action: "add-item",
+      proposedItems: [],
+      proposedVisibleMarkdown: "",
+    },
+  });
+
+  assert.equal(disabled, undefined);
+});
+
+test("apply disabled state keeps genuinely empty jobs disabled when no draft exists", () => {
+  const disabled = applyDisabledReasonForJob({
+    ...job,
+    id: "job-empty-no-draft",
+    status: "completed",
+    mergeProposal: {
+      schemaVersion: 1,
+      action: "add-item",
+      proposedItems: [],
+      proposedVisibleMarkdown: "",
+    },
+  });
+
+  assert.match(disabled ?? "", /no usable proposal/i);
 });
 
 test("tab selection resets to the first job in the selected filter", () => {

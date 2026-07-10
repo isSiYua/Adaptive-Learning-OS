@@ -178,6 +178,9 @@ export function resolveSourceBlockInLiveNote(markdown: string, job: AskJob): Res
   })).concat(findAllGeneratedRanges(markdown));
   const inconsistent = hasSelectedSourceMismatch(job);
 
+  const inlineGeneratedAnchor = resolveInlineDraftGeneratedSourceAnchor(markdown, job);
+  if (inlineGeneratedAnchor) return inlineGeneratedAnchor;
+
   if (
     !inconsistent &&
     typeof job.sourceStartOffset === "number" &&
@@ -202,6 +205,40 @@ export function resolveSourceBlockInLiveNote(markdown: string, job: AskJob): Res
   }
 
   return { start: markdown.length, end: markdown.length, exists: false, inconsistent, method: "missing" };
+}
+
+function resolveInlineDraftGeneratedSourceAnchor(markdown: string, job: AskJob): ResolvedSourceBlock | null {
+  if (!job.inlineDraft || job.askSourceMode !== "generated-content-item") return null;
+  const source = job.sourceBlock.trim();
+  if (!source || !source.includes("learnos-generated-id")) return null;
+  const sourceStartOffset = job.sourceStartOffset;
+  const sourceEndOffset = job.sourceEndOffset;
+  const offsetMatch =
+    typeof sourceStartOffset === "number" &&
+    typeof sourceEndOffset === "number" &&
+    sourceStartOffset >= 0 &&
+    sourceEndOffset <= markdown.length &&
+    markdown.slice(sourceStartOffset, sourceEndOffset).trim() === source;
+  if (offsetMatch) {
+    return {
+      start: sourceStartOffset,
+      end: sourceEndOffset,
+      exists: true,
+      inconsistent: false,
+      method: "offset",
+    };
+  }
+  const index = markdown.indexOf(source);
+  if (index >= 0) {
+    return {
+      start: index,
+      end: index + source.length,
+      exists: true,
+      inconsistent: false,
+      method: "exact-source",
+    };
+  }
+  return null;
 }
 
 function findAllGeneratedRanges(markdown: string): Array<{ start: number; end: number }> {
@@ -336,6 +373,10 @@ function findCalloutBlockStart(markdown: string, markerStart: number): number {
     const previousStart = markdown.lastIndexOf("\n", previousEnd - 1) + 1;
     const line = markdown.slice(previousStart, previousEnd);
     if (!line.trim().startsWith(">") && line.trim() !== "") break;
+    if (isTopLevelCalloutHeader(line)) {
+      start = previousStart;
+      break;
+    }
     start = previousStart;
   }
   return start;
@@ -343,14 +384,28 @@ function findCalloutBlockStart(markdown: string, markerStart: number): number {
 
 function findCalloutBlockEnd(markdown: string, markerEnd: number): number {
   let cursor = markerEnd;
+  let previousWasQuoted = true;
+  let afterBlank = false;
   while (cursor < markdown.length) {
     const nextBreak = markdown.indexOf("\n", cursor);
     if (nextBreak === -1) return markdown.length;
     const nextLineStart = nextBreak + 1;
     const nextLineEnd = markdown.indexOf("\n", nextLineStart);
     const line = markdown.slice(nextLineStart, nextLineEnd === -1 ? markdown.length : nextLineEnd);
-    if (!line.trim().startsWith(">") && line.trim() !== "") return nextBreak + 1;
+    const trimmed = line.trim();
+    if (!trimmed.startsWith(">") && trimmed !== "" && (!previousWasQuoted || afterBlank)) return nextBreak + 1;
+    if (isTopLevelCalloutHeader(line)) return nextBreak + 1;
+    if (trimmed === "") {
+      afterBlank = true;
+    } else {
+      previousWasQuoted = trimmed.startsWith(">");
+      afterBlank = false;
+    }
     cursor = nextLineEnd === -1 ? markdown.length : nextLineEnd;
   }
   return markdown.length;
+}
+
+function isTopLevelCalloutHeader(line: string): boolean {
+  return /^>\s*\[![^\]]+\]/.test(line.trim());
 }
